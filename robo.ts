@@ -1,5 +1,5 @@
 // =====================================================================
-// Radar · robô "verificar" (versão 5: + perfil, calendário, legendas, campanhas, tendências)
+// Radar · robô "verificar" (versão 6: planos, várias lojas, alertas, e-mails, índice do nicho, Mercado Pago)
 // - Site: lê produtos com foto, preço, preço antigo e desconto (JSON-LD,
 //   Shopify e cartões de produto), promoções e frete. Corrige acentos.
 // - Instagram (opcional): seguidores, posts com foto, curtidas, comentários,
@@ -23,6 +23,9 @@ const GRAPH = "https://graph.facebook.com/" + (env("IG_GRAPH_VERSION") || "v26.0
 const MODELOS = [env("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-flash-latest"].filter(Boolean);
 const SEIS_HORAS = 6 * 3600 * 1000;
 const POR_RODADA = 4;
+const SITE_URL = env("SITE_URL") || "https://klayton-wj.github.io/radar/";
+const MP_TOKEN = env("MP_ACCESS_TOKEN");
+const SMTP_USER = env("SMTP_USER"), SMTP_PASS = env("SMTP_PASS");
 const UA = "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
 
 const CORS = {
@@ -480,7 +483,8 @@ Responda APENAS com este JSON:
 
 // ------------------------------------------------------------ verificação
 async function verificar(c: any) {
-  const { data: loja } = await db.from("empresas").select("*").eq("user_id", c.user_id).maybeSingle();
+  let { data: loja } = c.empresa_id ? await db.from("empresas").select("*").eq("id", c.empresa_id).maybeSingle() : { data: null } as any;
+  if (!loja) loja = (await db.from("empresas").select("*").eq("user_id", c.user_id).order("principal", { ascending: false }).limit(1).maybeSingle()).data;
   const { data: ant } = await db.from("verificacoes").select("dados").eq("concorrente_id", c.id)
     .order("feita_em", { ascending: false }).limit(1).maybeSingle();
   const [site, ig, minhaIg] = await Promise.all([
@@ -504,7 +508,7 @@ async function verificar(c: any) {
     : mesmaCoisa ? { ...ant!.dados.ia, reaproveitado: true }
     : await gemini(montaPrompt(loja, minhaIg, c, site, ig, mudancas), true);
   const { amostra: _a, ...siteSalvo } = site as any;
-  const dados = { versao: 4, site: siteSalvo, instagram: ig, minha_loja: minhaIg, anuncios: { biblioteca: bibliotecaAnuncios(c) }, mudancas, ia, assinatura };
+  const dados = { versao: 6, site: siteSalvo, instagram: ig, minha_loja: minhaIg, anuncios: { biblioteca: bibliotecaAnuncios(c) }, mudancas, ia, assinatura };
   const agora = new Date().toISOString();
   await db.from("verificacoes").insert({ concorrente_id: c.id, user_id: c.user_id, feita_em: agora, dados });
   await db.from("concorrentes").update({ ultima_verificacao: agora }).eq("id", c.id);
@@ -524,19 +528,38 @@ async function verificar(c: any) {
   if (ig.ok) {
     const virais = ig.posts.filter((p: any) => (p.vezes_media || 0) >= 2 && p.link);
     if (virais.length) await db.from("analises").upsert(virais.map((p: any) => ({
-      user_id: c.user_id, tipo: "swipe", chave: p.link,
+      user_id: c.user_id, empresa_id: loja?.id || c.empresa_id, tipo: "swipe", chave: p.link,
       dados: { ...p, concorrente: c.nome, concorrente_id: c.id, usuario: ig.usuario, seguidores: ig.seguidores },
-    })), { onConflict: "user_id,tipo,chave" });
+    })), { onConflict: "empresa_id,tipo,chave" });
   }
+  // alertas (aparecem no sino do Radar e, nos planos com e-mail, chegam por e-mail)
+  const alertas: any[] = [];
+  const base = { user_id: c.user_id, empresa_id: loja?.id || c.empresa_id, concorrente_id: c.id };
+  if (ig.ok) {
+    const dois = Date.now() - 3 * 86400e3;
+    ig.posts.filter((p: any) => (p.vezes_media || 0) >= 3 && Date.parse(p.data) > dois).forEach((p: any) =>
+      alertas.push({ ...base, tipo: "viral", chave: p.link, titulo: `${c.nome} viralizou: ${p.tipo} com ${String(p.vezes_media).replace(".", ",")}x a média`, texto: corta(p.legenda || "", 200), link: p.link }));
+    if (ant?.dados?.instagram?.ok) {
+      const dif = ig.seguidores - ant.dados.instagram.seguidores;
+      if (dif >= Math.max(100, ant.dados.instagram.seguidores * 0.03))
+        alertas.push({ ...base, tipo: "seguidores", chave: c.id + ":" + hoje(), titulo: `${c.nome} ganhou ${dif} seguidores desde a última leitura`, texto: "Vale olhar o que ela postou ou anunciou.", link: `https://instagram.com/${ig.usuario}` });
+    }
+  }
+  if (site.ok && ant?.dados?.site?.ok) {
+    const velhas = new Set(ant.dados.site.promocoes || []);
+    (site as any).promocoes.filter((x: string) => !velhas.has(x)).slice(0, 2).forEach((x: string) =>
+      alertas.push({ ...base, tipo: "promocao", chave: c.id + ":" + x.slice(0, 80), titulo: `${c.nome} lançou promoção`, texto: x, link: (site as any).url }));
+  }
+  if (alertas.length) await db.from("alertas").upsert(alertas, { onConflict: "user_id,tipo,chave", ignoreDuplicates: true });
   return { id: c.id, nome: c.nome, site_ok: site.ok, ig_ok: ig.ok, ia_ok: !(ia as any).erro, feita_em: agora, dados };
 }
 
 
 // ------------------------------------------------------------ planejamento (etapa 5)
 const hoje = () => new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
-async function contexto(uid: string) {
-  const { data: loja } = await db.from("empresas").select("*").eq("user_id", uid).maybeSingle();
-  const { data: cs } = await db.from("concorrentes").select("id,nome,instagram,cidade").eq("user_id", uid);
+async function contexto(emp: any) {
+  const loja = emp;
+  const { data: cs } = await db.from("concorrentes").select("id,nome,instagram,cidade").eq("empresa_id", emp.id);
   const conc: any[] = [];
   for (const c of cs || []) {
     const { data: v } = await db.from("verificacoes").select("dados,feita_em").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle();
@@ -561,11 +584,11 @@ const ADAPTA = "Adapte tudo ao nicho e à modalidade da loja: loja física pede 
 const meuTxt = (m: any) => m?.ok ? JSON.stringify({ seguidores: m.seguidores, posts_semana: m.posts_semana, engajamento_pct: m.engajamento, ultimo_post_dias: m.ultimo_post_dias,
   ritmo: m.ritmo, bio: m.bio, posts: m.posts.slice(0, 20).map((p: any) => ({ tipo: p.tipo, legenda: corta(p.legenda || "", 160), curtidas: p.curtidas, comentarios: p.comentarios, vezes_media: p.vezes_media, data: p.data?.slice(0, 10) })) })
   : "Instagram da loja não disponível (conta pessoal ou não informada).";
-const salva = (uid: string, tipo: string, chave: string, dados: any) =>
-  db.from("analises").upsert({ user_id: uid, tipo, chave, dados, criado_em: new Date().toISOString() }, { onConflict: "user_id,tipo,chave" });
+const salva = (emp: any, tipo: string, chave: string, dados: any) =>
+  db.from("analises").upsert({ user_id: emp.user_id, empresa_id: emp.id, tipo, chave, dados, criado_em: new Date().toISOString() }, { onConflict: "empresa_id,tipo,chave" });
 
-async function analisarPerfil(uid: string) {
-  const { loja, conc, meu } = await contexto(uid);
+async function analisarPerfil(emp: any) {
+  const { loja, conc, meu } = await contexto(emp);
   if (!meu.ok) return { erro: meu.erro === "instagram_nao_conectado" ? "O Instagram ainda não foi conectado ao Radar." : "Não conseguimos ler o Instagram da sua loja. Ele precisa ser uma conta Comercial ou de Criador. Confira o @ em Minha loja." };
   const ia = await gemini(`Você é um estrategista de Instagram para pequenos negócios no Brasil (qualquer nicho, físico ou online). ${ADAPTA} Português do Brasil, direto e prático.
 MINHA LOJA: ${lojaTxt(loja)}
@@ -578,12 +601,12 @@ Responda APENAS com este JSON:
  "melhor_dia_horario": "frase usando o ritmo real", "bio_sugerida": "bio de até 150 caracteres", "comparacao": "1 frase comparando com as concorrentes"}
 "acoes": 5 ações.`);
   const dados = { ...ia, meu: { ...meu, posts: meu.posts.slice(0, 36) }, gerado_em: new Date().toISOString() };
-  await salva(uid, "perfil", "atual", dados);
+  await salva(emp, "perfil", "atual", dados);
   return dados;
 }
 
-async function gerarCalendario(uid: string, datas: any[]) {
-  const { loja, conc, meu } = await contexto(uid);
+async function gerarCalendario(emp: any, datas: any[]) {
+  const { loja, conc, meu } = await contexto(emp);
   const nicho: Record<string, { posts: number; soma: number }> = {};
   conc.forEach((c) => (c.ritmo?.dias || []).forEach((d: any) => { nicho[d.dia] = nicho[d.dia] || { posts: 0, soma: 0 }; nicho[d.dia].posts += d.posts; nicho[d.dia].soma += d.media * d.posts; }));
   const diasNicho = Object.entries(nicho).map(([dia, v]) => ({ dia, posts: v.posts, media: v.posts ? Math.round(v.soma / v.posts) : 0 }));
@@ -599,12 +622,12 @@ Responda APENAS com este JSON:
  "stories_diarios": "sugestão de rotina de stories", "observacao": "1 frase sobre a estratégia da semana"}
 "semana": exatamente 6 itens, de Segunda a Sábado.`);
   const dados = { ...ia, nicho: diasNicho, meu_ritmo: meu.ok ? meu.ritmo : null, gerado_em: new Date().toISOString() };
-  await salva(uid, "calendario", "atual", dados);
+  await salva(emp, "calendario", "atual", dados);
   return dados;
 }
 
-async function reescreverLegenda(uid: string, legenda: string, concorrente: string, tipo: string) {
-  const { data: loja } = await db.from("empresas").select("*").eq("user_id", uid).maybeSingle();
+async function reescreverLegenda(emp: any, legenda: string, concorrente: string, tipo: string) {
+  const loja = emp;
   return await gemini(`Você é copywriter de Instagram para pequenos negócios no Brasil. ${ADAPTA}
 Esta legenda de ${concorrente || "uma concorrente"} (post em ${tipo || "formato não informado"}) teve muito mais engajamento que a média dela:
 """${String(legenda || "").slice(0, 1500)}"""
@@ -616,8 +639,8 @@ Responda APENAS com este JSON:
  "hashtags": ["5 a 8 hashtags relevantes"]}`);
 }
 
-async function gerarCampanha(uid: string, data: any) {
-  const { loja, conc } = await contexto(uid);
+async function gerarCampanha(emp: any, data: any) {
+  const { loja, conc } = await contexto(emp);
   const ia = await gemini(`Você é estrategista de varejo e marketing local no Brasil (qualquer nicho, físico ou online). ${ADAPTA} Monte uma campanha para a data comercial abaixo.
 DATA: ${data?.nome} em ${data?.data} (faltam ${data?.faltam} dias). Hoje é ${hoje()}.
 MINHA LOJA: ${lojaTxt(loja)}
@@ -630,7 +653,7 @@ Responda APENAS com este JSON:
  "legenda_principal": "legenda pronta", "anuncio": {"publico": "sugestão de público", "verba_sugerida": "faixa em R$ por dia", "texto": "texto do anúncio"}}
 "cronograma": 5 a 7 passos. "criativos": 4 ideias.`);
   const dados = { ...ia, data, gerado_em: new Date().toISOString() };
-  await salva(uid, "campanha", String(data?.id || data?.data || "data"), dados);
+  await salva(emp, "campanha", String(data?.id || data?.data || "data"), dados);
   return dados;
 }
 
@@ -671,6 +694,9 @@ async function atualizarTermo(t: any) {
     r.leitura.variacao = base ? Math.round((r.leitura.posts_24h / base - 1) * 100) : null;
     r.leitura.top = r.top;
     hist.push(r.leitura);
+    if (r.leitura.alta) await db.from("alertas").upsert({ user_id: t.user_id, empresa_id: t.empresa_id, tipo: "tendencia", chave: t.id + ":" + hoje(),
+      titulo: `#${t.termo} está em alta (+${r.leitura.variacao}%)`, texto: `${r.leitura.posts_24h} posts nas últimas 24 horas.`, link: (r.top || [])[0]?.link || null },
+      { onConflict: "user_id,tipo,chave", ignoreDuplicates: true });
   } else {
     hist.push({ em: new Date().toISOString(), erro: r.erro });
   }
@@ -678,52 +704,330 @@ async function atualizarTermo(t: any) {
   return { ...r, historico: hist.slice(-60) };
 }
 
+// ------------------------------------------------------------ planos e uso da IA
+const cachePlano: Record<string, { em: number; p: any }> = {};
+async function planoDe(uid: string) {
+  const c = cachePlano[uid];
+  if (c && Date.now() - c.em < 60e3) return c.p;
+  const { data } = await db.rpc("meu_plano", { uid });
+  const p = (Array.isArray(data) ? data[0] : data) || { id: "gratis", max_lojas: 1, max_concorrentes: 2, max_termos: 0, intervalo_horas: 24, ia_mes: 5, recursos: [] };
+  cachePlano[uid] = { em: Date.now(), p };
+  return p;
+}
+const tem = (p: any, r: string) => (p?.recursos || []).includes(r);
+const mesAtual = () => new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 7);
+async function usoIA(uid: string) {
+  const { data } = await db.from("uso_ia").select("total").eq("user_id", uid).eq("mes", mesAtual()).maybeSingle();
+  return data?.total || 0;
+}
+async function gastaIA(uid: string, p: any) {
+  const usado = await usoIA(uid);
+  if (usado >= p.ia_mes) return { erro: `Você usou os ${p.ia_mes} usos de IA do plano ${p.nome} neste mês. Faça upgrade em Planos para continuar.`, limite: true };
+  await db.from("uso_ia").upsert({ user_id: uid, mes: mesAtual(), total: usado + 1 }, { onConflict: "user_id,mes" });
+  return null;
+}
+const PRECISA: Record<string, string> = { perfil: "perfil", calendario: "calendario", campanha: "campanhas", reescrever: "inspiracoes", gerar: "gerador", indice: "indice" };
+const NOME_REC: Record<string, string> = { perfil: "Meu perfil", calendario: "Calendário", campanhas: "Campanhas", inspiracoes: "Inspirações", gerador: "Criar com IA", indice: "Índice do nicho", aprovacao: "Aprovação do cliente" };
+
+// ------------------------------------------------------------ gerador livre e índice do nicho
+async function gerarLivre(emp: any, tipo: string, tema: string, tom: string) {
+  const pedidos: Record<string, string> = {
+    legenda: `3 legendas prontas sobre o tema, com emojis moderados e chamada para ação`,
+    roteiro: `2 roteiros de Reels de 30 segundos, cada um com cenas e tempos (0-3s, 3-12s, 12-24s, 24-30s)`,
+    stories: `uma sequência de 5 stories para o dia, com o que mostrar e o texto de cada um, incluindo enquete ou caixinha`,
+    hashtags: `3 grupos de hashtags (alcance, nicho e local), 8 a 10 em cada`,
+    ideias: `10 ideias de posts variadas (formato + título + por que funciona)`,
+    anuncio: `2 textos de anúncio (título curto + texto) e sugestão de público`,
+  };
+  return await gemini(`Você é social media de pequenos negócios no Brasil. ${ADAPTA}
+MINHA LOJA: ${lojaTxt(emp)}
+TEMA: ${String(tema || "livre").slice(0, 300)}
+TOM DE VOZ: ${String(tom || "o tom natural da marca").slice(0, 80)}
+Crie: ${pedidos[tipo] || pedidos.legenda}.
+Responda APENAS com este JSON:
+{"titulo": "título curto do resultado", "itens": [{"titulo": "nome do item", "texto": "conteúdo completo pronto para copiar"}], "dica": "1 dica de uso"}`);
+}
+
+async function indiceNicho(emp: any) {
+  const { data: lojas } = await db.from("empresas").select("id").eq("segmento", emp.segmento).limit(400);
+  const ids = (lojas || []).map((l: any) => l.id);
+  const { data: cs } = ids.length ? await db.from("concorrentes").select("id").in("empresa_id", ids).limit(1500) : { data: [] } as any;
+  const vistos = new Set<string>(), valores: any[] = [];
+  for (const c of (cs || []).slice(0, 300)) {
+    const { data: v } = await db.from("verificacoes").select("dados->instagram").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle();
+    const ig = (v as any)?.instagram;
+    if (ig?.ok && !vistos.has(ig.usuario)) { vistos.add(ig.usuario); valores.push(ig); }
+  }
+  const med = (arr: number[]) => { const a = arr.filter((x) => x >= 0).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : null; };
+  const formatos: Record<string, number> = {};
+  valores.forEach((ig) => (ig.ritmo?.formatos || []).forEach((f: any) => { formatos[f.formato] = (formatos[f.formato] || 0) + f.posts; }));
+  const meu = emp.instagram ? await lerInstagram(emp.instagram, 24) : { ok: false } as any;
+  return {
+    nicho: emp.segmento, perfis: valores.length,
+    engajamento: med(valores.map((x) => x.engajamento)), posts_semana: med(valores.map((x) => x.posts_semana)),
+    seguidores: med(valores.map((x) => x.seguidores)), formatos,
+    meu: meu.ok ? { engajamento: meu.engajamento, posts_semana: meu.posts_semana, seguidores: meu.seguidores } : null,
+    suficiente: valores.length >= 5, gerado_em: new Date().toISOString(),
+  };
+}
+
+// ------------------------------------------------------------ e-mails (alertas e relatório mensal)
+// envio de e-mail: Resend (se RESEND_API_KEY existir) ou SMTP do Gmail (porta 465), sem bibliotecas externas
+const b64 = (s: string) => { const b = new TextEncoder().encode(s); let t = ""; for (let i = 0; i < b.length; i += 0x8000) t += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(t); };
+async function smtpEnvia(para: string, assunto: string, html: string) {
+  const conn = await Deno.connectTls({ hostname: env("SMTP_HOST") || "smtp.gmail.com", port: Number(env("SMTP_PORT") || 465) });
+  const dec = new TextDecoder(), enc = new TextEncoder(), buf = new Uint8Array(8192);
+  const ler = async () => {
+    let s = "";
+    for (let i = 0; i < 50; i++) {
+      const n = await conn.read(buf); if (n === null) break;
+      s += dec.decode(buf.subarray(0, n));
+      const linhas = s.split(/\r?\n/).filter(Boolean);
+      if (linhas.length && /^\d{3} /.test(linhas[linhas.length - 1])) break;
+    }
+    return s;
+  };
+  const cmd = async (c: string, esperado: string) => {
+    await conn.write(enc.encode(c + "\r\n"));
+    const r = await ler();
+    if (!r.startsWith(esperado) && !r.split(/\r?\n/).some((l) => l.startsWith(esperado + " "))) throw new Error("SMTP: " + r.slice(0, 200));
+    return r;
+  };
+  try {
+    await ler();
+    await cmd("EHLO radar", "250");
+    await cmd("AUTH LOGIN", "334");
+    await cmd(btoa(SMTP_USER), "334");
+    await cmd(btoa(SMTP_PASS), "235");
+    await cmd(`MAIL FROM:<${SMTP_USER}>`, "250");
+    await cmd(`RCPT TO:<${para}>`, "250");
+    await cmd("DATA", "354");
+    const corpo = b64(html).replace(/.{1,76}/g, "$&\r\n");
+    const msg = [`From: =?UTF-8?B?${b64("Radar")}?= <${SMTP_USER}>`, `To: <${para}>`, `Subject: =?UTF-8?B?${b64(assunto)}?=`, `Date: ${new Date().toUTCString()}`,
+      "MIME-Version: 1.0", "Content-Type: text/html; charset=UTF-8", "Content-Transfer-Encoding: base64", "", corpo].join("\r\n");
+    await conn.write(enc.encode(msg + "\r\n.\r\n"));
+    const r = await ler(); if (!r.startsWith("250")) throw new Error("SMTP: " + r.slice(0, 200));
+    await conn.write(enc.encode("QUIT\r\n"));
+    return true;
+  } finally { try { conn.close(); } catch { /* ok */ } }
+}
+async function enviaEmail(para: string, assunto: string, html: string) {
+  if (!para) return false;
+  try {
+    if (env("RESEND_API_KEY")) {
+      const r = await fetch("https://api.resend.com/emails", { method: "POST", headers: { Authorization: `Bearer ${env("RESEND_API_KEY")}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ from: env("EMAIL_FROM") || "Radar <onboarding@resend.dev>", to: [para], subject: assunto, html }) });
+      return r.ok;
+    }
+    if (!SMTP_USER || !SMTP_PASS) return false;
+    return await smtpEnvia(para, assunto, html);
+  } catch (e) { console.error("email", e); return false; }
+}
+const esc = (s: any) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as any)[c]);
+const moldura = (titulo: string, corpo: string) => `<!doctype html><html><body style="margin:0;background:#f4f4f7;font-family:Segoe UI,Roboto,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px 12px"><table width="100%" style="max-width:560px;background:#fff;border-radius:18px;overflow:hidden">
+<tr><td style="height:6px;background:#d62976;background-image:linear-gradient(90deg,#feda75,#fa7e1e,#d62976,#962fbf,#4f5bd5)"></td></tr>
+<tr><td style="padding:26px 28px 6px"><b style="font-size:20px;color:#15151f">Radar</b><h1 style="font-size:21px;margin:14px 0 0;color:#15151f">${titulo}</h1></td></tr>
+<tr><td style="padding:8px 28px 26px;font-size:14.5px;line-height:1.55;color:#3b3b4a">${corpo}
+<p style="margin-top:22px"><a href="${SITE_URL}app.html" style="background:#d62976;color:#fff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:12px;display:inline-block">Abrir o Radar</a></p></td></tr>
+</table><p style="font-size:11px;color:#9a9aa8">Radar · Inteligência de concorrência para lojas e negócios</p></td></tr></table></body></html>`;
+
+async function emailsDeAlerta() {
+  const { data: pend } = await db.from("alertas").select("*").eq("enviado", false).order("criado_em").limit(200);
+  if (!pend?.length) return 0;
+  const porUser: Record<string, any[]> = {};
+  pend.forEach((a: any) => (porUser[a.user_id] = porUser[a.user_id] || []).push(a));
+  let n = 0;
+  for (const [uid, lista] of Object.entries(porUser)) {
+    const p = await planoDe(uid);
+    if (tem(p, "alertas")) {
+      const { data: pf } = await db.from("perfis").select("email,nome").eq("id", uid).maybeSingle();
+      const corpo = `<p>Olá, ${esc((pf?.nome || "").split(" ")[0])}! O Radar encontrou novidades nas suas concorrentes:</p>` + lista.slice(0, 12).map((a) =>
+        `<div style="border:1px solid #eeeef3;border-radius:12px;padding:12px 14px;margin:10px 0"><b style="color:#15151f">${esc(a.titulo)}</b>${a.texto ? `<div style="margin-top:4px">${esc(a.texto)}</div>` : ""}${a.link ? `<div style="margin-top:6px"><a href="${esc(a.link)}" style="color:#962fbf;font-weight:700">Ver ↗</a></div>` : ""}</div>`).join("");
+      if (await enviaEmail(pf?.email, `Radar: ${lista.length} novidade(s) nas concorrentes`, moldura("Novidades nas concorrentes", corpo))) n++;
+    }
+    await db.from("alertas").update({ enviado: true }).in("id", lista.map((a) => a.id));
+  }
+  return n;
+}
+
+async function relatoriosMensais() {
+  const agora = new Date(Date.now() - 3 * 3600e3);
+  if (agora.getUTCDate() > 3 || agora.getUTCHours() < 8) return 0;   // dias 1 a 3 do mês, a partir das 8h
+  const mes = mesAtual();
+  const { data: pfs } = await db.from("perfis").select("id,nome,email,ultimo_relatorio,agencia_nome").or(`ultimo_relatorio.is.null,ultimo_relatorio.neq.${mes}`).limit(30);
+  let n = 0;
+  for (const pf of pfs || []) {
+    const p = await planoDe(pf.id);
+    if (!tem(p, "relatorio_mensal")) { await db.from("perfis").update({ ultimo_relatorio: mes }).eq("id", pf.id); continue; }
+    const { data: lojas } = await db.from("empresas").select("*").eq("user_id", pf.id);
+    const desde = new Date(Date.now() - 31 * 86400e3).toISOString();
+    for (const emp of lojas || []) {
+      const { data: cs } = await db.from("concorrentes").select("id,nome,instagram").eq("empresa_id", emp.id);
+      const linhas: string[] = [];
+      for (const c of cs || []) {
+        const { data: hs } = await db.from("verificacoes").select("feita_em,seg:dados->instagram->seguidores,eng:dados->instagram->engajamento").eq("concorrente_id", c.id).gte("feita_em", desde).order("feita_em");
+        const H = (hs || []).filter((h: any) => typeof h.seg === "number");
+        const ini = H[0]?.seg, fim = H[H.length - 1]?.seg, eng = H[H.length - 1]?.eng;
+        linhas.push(`<tr><td style="padding:8px 6px;border-bottom:1px solid #eee"><b>${esc(c.nome)}</b><br><span style="color:#888">${esc(c.instagram)}</span></td><td style="padding:8px 6px;border-bottom:1px solid #eee">${fim ?? "—"}</td><td style="padding:8px 6px;border-bottom:1px solid #eee">${ini != null && fim != null ? (fim - ini >= 0 ? "+" : "") + (fim - ini) : "—"}</td><td style="padding:8px 6px;border-bottom:1px solid #eee">${eng != null ? String(eng).replace(".", ",") + "%" : "—"}</td></tr>`);
+      }
+      const { data: virais } = await db.from("analises").select("dados").eq("empresa_id", emp.id).eq("tipo", "swipe").gte("criado_em", desde).limit(5);
+      const corpo = `<p>Resumo dos últimos 30 dias de <b>${esc(emp.nome_fantasia)}</b>${tem(p, "marca_branca") && pf.agencia_nome ? `, preparado por <b>${esc(pf.agencia_nome)}</b>` : ""}.</p>
+<table width="100%" style="border-collapse:collapse;font-size:13.5px"><tr style="color:#888;text-align:left"><th style="padding:6px">Concorrente</th><th style="padding:6px">Seguidores</th><th style="padding:6px">No mês</th><th style="padding:6px">Engaj.</th></tr>${linhas.join("") || '<tr><td colspan="4" style="padding:8px">Nenhuma concorrente cadastrada.</td></tr>'}</table>
+${(virais || []).length ? `<p style="margin-top:16px"><b>Posts que mais engajaram nas concorrentes:</b></p>` + (virais || []).map((v: any) => `<p>• ${esc(v.dados?.concorrente)}: ${esc(corta(v.dados?.legenda || "", 120))} (${String(v.dados?.vezes_media || "").replace(".", ",")}x a média)</p>`).join("") : ""}
+<p style="margin-top:16px">O relatório completo em PDF, com gráficos, está no Radar em <b>Planejar → Relatório PDF</b>.</p>`;
+      const html = moldura(`Relatório mensal · ${esc(emp.nome_fantasia)}`, corpo);
+      if (await enviaEmail(pf.email, `Relatório mensal de concorrência · ${emp.nome_fantasia}`, html)) n++;
+      if (emp.cliente_email && emp.cliente_email !== pf.email) await enviaEmail(emp.cliente_email, `Relatório mensal de concorrência · ${emp.nome_fantasia}`, html);
+    }
+    await db.from("perfis").update({ ultimo_relatorio: mes }).eq("id", pf.id);
+  }
+  return n;
+}
+
+// ------------------------------------------------------------ Mercado Pago (assinatura mensal)
+async function mp(path: string, metodo = "GET", corpo?: any) {
+  const r = await fetch("https://api.mercadopago.com" + path, { method: metodo, headers: { Authorization: `Bearer ${MP_TOKEN}`, "Content-Type": "application/json" }, body: corpo ? JSON.stringify(corpo) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.message || j?.error || ("Mercado Pago " + r.status));
+  return j;
+}
+async function assinar(uid: string, email: string, planoId: string) {
+  if (!MP_TOKEN) return { erro: "O pagamento ainda não foi configurado no Radar." };
+  const { data: p } = await db.from("planos").select("*").eq("id", planoId).maybeSingle();
+  if (!p || !(p.preco > 0)) return { erro: "Plano inválido." };
+  const pre = await mp("/preapproval", "POST", {
+    reason: `Radar · Plano ${p.nome}`, external_reference: `${uid}|${p.id}`, payer_email: email, back_url: SITE_URL + "app.html#planos",
+    auto_recurring: { frequency: 1, frequency_type: "months", transaction_amount: Number(p.preco), currency_id: "BRL" }, status: "pending",
+  });
+  await db.from("assinaturas").upsert({ user_id: uid, plano: (await planoDe(uid)).id, status: "ativa", mp_preapproval_id: null, atualizado_em: new Date().toISOString() }, { onConflict: "user_id", ignoreDuplicates: true });
+  return { link: pre.init_point, id: pre.id };
+}
+async function sincronizaAssinatura(preId: string) {
+  const pre = await mp("/preapproval/" + preId);
+  const [uid, planoId] = String(pre.external_reference || "").split("|");
+  if (!uid || !planoId) return { ignorado: true };
+  const st = pre.status; // pending | authorized | paused | cancelled
+  if (st === "authorized") {
+    const prox = pre.next_payment_date ? new Date(Date.parse(pre.next_payment_date) + 5 * 86400e3).toISOString() : null;
+    await db.from("assinaturas").upsert({ user_id: uid, plano: planoId, status: "ativa", mp_preapproval_id: preId, valido_ate: prox, atualizado_em: new Date().toISOString() }, { onConflict: "user_id" });
+  } else if (st === "cancelled" || st === "paused") {
+    const { data: a } = await db.from("assinaturas").select("mp_preapproval_id").eq("user_id", uid).maybeSingle();
+    if (!a?.mp_preapproval_id || a.mp_preapproval_id === preId)
+      await db.from("assinaturas").upsert({ user_id: uid, plano: "gratis", status: "ativa", mp_preapproval_id: null, valido_ate: null, atualizado_em: new Date().toISOString() }, { onConflict: "user_id" });
+  }
+  delete cachePlano[uid];
+  return { uid, status: st };
+}
+
+// ------------------------------------------------------------ servidor
+async function empresaDo(uid: string, empresaId?: string) {
+  if (empresaId) {
+    const { data } = await db.from("empresas").select("*").eq("id", empresaId).eq("user_id", uid).maybeSingle();
+    if (data) return data;
+  }
+  const { data } = await db.from("empresas").select("*").eq("user_id", uid).order("principal", { ascending: false }).order("criado_em").limit(1).maybeSingle();
+  return data;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
+    const url = new URL(req.url);
     const body = await req.json().catch(() => ({}));
+
+    // aviso do Mercado Pago (webhook): confere direto na API do Mercado Pago antes de mudar o plano
+    if (url.searchParams.get("mp") === "1") {
+      const id = body?.data?.id || url.searchParams.get("data.id") || url.searchParams.get("id");
+      const tipo = body?.type || url.searchParams.get("type") || url.searchParams.get("topic") || "";
+      if (id && /preapproval/.test(tipo) && MP_TOKEN) { try { await sincronizaAssinatura(String(id)); } catch (e) { console.error("mp", e); } }
+      return resp({ ok: true });
+    }
+
+    // agendador
     if (CRON_SECRET && req.headers.get("x-cron-secret") === CRON_SECRET) {
       const limite = new Date(Date.now() - SEIS_HORAS + 5 * 60 * 1000).toISOString();
-      const { data: lista, error } = await db.from("concorrentes").select("*")
-        .lte("ultima_verificacao", limite).order("ultima_verificacao", { ascending: true }).limit(POR_RODADA);
+      const { data: candidatos, error } = await db.from("concorrentes").select("*")
+        .lte("ultima_verificacao", limite).order("ultima_verificacao", { ascending: true }).limit(40);
       if (error) return resp({ erro: error.message }, 500);
+      const lista: any[] = [];
+      for (const c of candidatos || []) {
+        const p = await planoDe(c.user_id);
+        if (Date.now() - Date.parse(c.ultima_verificacao) >= (p.intervalo_horas || 6) * 3600e3 - 5 * 60e3) lista.push(c);
+        if (lista.length >= POR_RODADA) break;
+      }
       const feitos = [];
-      for (const c of lista || []) {
+      for (const c of lista) {
         try { const r = await verificar(c); feitos.push({ nome: r.nome, site_ok: r.site_ok, ig_ok: r.ig_ok, ia_ok: r.ia_ok }); }
         catch (e) { feitos.push({ nome: c.nome, erro: String(e) }); }
         await new Promise((ok) => setTimeout(ok, 1500));
       }
-      const limiteT = new Date(Date.now() - SEIS_HORAS + 5 * 60 * 1000).toISOString();
-      const { data: ts } = await db.from("termos").select("*").lte("ultima_leitura", limiteT).order("ultima_leitura", { ascending: true }).limit(5);
+      const { data: ts } = await db.from("termos").select("*").lte("ultima_leitura", limite).order("ultima_leitura", { ascending: true }).limit(5);
       let termos = 0;
       for (const t of ts || []) { try { await atualizarTermo(t); termos++; } catch { /* segue */ } }
-      return resp({ verificados: feitos.length, feitos, termos });
+      const emails = await emailsDeAlerta().catch(() => 0);
+      const relatorios = await relatoriosMensais().catch(() => 0);
+      return resp({ verificados: feitos.length, feitos, termos, emails, relatorios });
     }
+
+    // usuário logado
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
     const { data: u } = await db.auth.getUser(token);
     if (!u?.user) return resp({ erro: "Faça login de novo." }, 401);
+    const uid = u.user.id;
+
     if (body.acao === "apagar_conta") {
-      // apaga o login; perfis, empresas, concorrentes e verificações saem junto (on delete cascade)
-      const { error } = await db.auth.admin.deleteUser(u.user.id);
+      const { data: a } = await db.from("assinaturas").select("mp_preapproval_id").eq("user_id", uid).maybeSingle();
+      if (a?.mp_preapproval_id && MP_TOKEN) { try { await mp("/preapproval/" + a.mp_preapproval_id, "PUT", { status: "cancelled" }); } catch { /* segue */ } }
+      const { error } = await db.auth.admin.deleteUser(uid);
       return error ? resp({ erro: error.message }, 500) : resp({ ok: true });
     }
-    const uid = u.user.id;
-    if (body.acao === "perfil") return resp(await analisarPerfil(uid));
-    if (body.acao === "calendario") return resp(await gerarCalendario(uid, body.datas || []));
-    if (body.acao === "reescrever") return resp(await reescreverLegenda(uid, body.legenda, body.concorrente, body.tipo));
-    if (body.acao === "campanha") return resp(await gerarCampanha(uid, body.data));
+    if (body.acao === "assinar") return resp(await assinar(uid, u.user.email || "", body.plano));
+    if (body.acao === "cancelar_assinatura") {
+      const { data: a } = await db.from("assinaturas").select("mp_preapproval_id").eq("user_id", uid).maybeSingle();
+      if (!a?.mp_preapproval_id) return resp({ erro: "Não há assinatura paga ativa." });
+      await mp("/preapproval/" + a.mp_preapproval_id, "PUT", { status: "cancelled" });
+      await sincronizaAssinatura(a.mp_preapproval_id);
+      return resp({ ok: true });
+    }
+    if (body.acao === "sincronizar_assinatura") {
+      const { data: a } = await db.from("assinaturas").select("mp_preapproval_id").eq("user_id", uid).maybeSingle();
+      const id = body.preapproval_id || a?.mp_preapproval_id;
+      if (!id || !MP_TOKEN) return resp({ ok: true });
+      const pre = await mp("/preapproval/" + id);
+      if (!String(pre.external_reference || "").startsWith(uid + "|")) return resp({ erro: "Assinatura de outra conta." }, 403);
+      return resp(await sincronizaAssinatura(id));
+    }
+
+    const p = await planoDe(uid);
+    const emp = await empresaDo(uid, body.empresa_id);
+    if (!emp && body.acao) return resp({ erro: "Loja não encontrada." }, 404);
+    const rec = PRECISA[body.acao];
+    if (rec && !tem(p, rec)) return resp({ erro: `${NOME_REC[rec] || "Este recurso"} não está no plano ${p.nome}. Veja os planos para liberar.`, bloqueado: rec }, 403);
+    if (["perfil", "calendario", "campanha", "reescrever", "gerar"].includes(body.acao)) {
+      const lim = await gastaIA(uid, p);
+      if (lim) return resp(lim, 429);
+    }
+    if (body.acao === "perfil") return resp(await analisarPerfil(emp));
+    if (body.acao === "calendario") return resp(await gerarCalendario(emp, body.datas || []));
+    if (body.acao === "reescrever") return resp(await reescreverLegenda(emp, body.legenda, body.concorrente, body.tipo));
+    if (body.acao === "campanha") return resp(await gerarCampanha(emp, body.data));
+    if (body.acao === "gerar") return resp(await gerarLivre(emp, body.tipo, body.tema, body.tom));
+    if (body.acao === "indice") { const r = await indiceNicho(emp); await salva(emp, "indice", "atual", r); return resp(r); }
     if (body.acao === "termo") {
       const { data: t } = await db.from("termos").select("*").eq("id", body.termo_id).eq("user_id", uid).maybeSingle();
       if (!t) return resp({ erro: "Termo não encontrado." }, 404);
       return resp(await atualizarTermo(t));
     }
+
     if (!body.concorrente_id) return resp({ erro: "concorrente_id faltando" }, 400);
-    const { data: c } = await db.from("concorrentes").select("*").eq("id", body.concorrente_id).eq("user_id", u.user.id).maybeSingle();
+    const { data: c } = await db.from("concorrentes").select("*").eq("id", body.concorrente_id).eq("user_id", uid).maybeSingle();
     if (!c) return resp({ erro: "Concorrente não encontrada." }, 404);
     const { data: ultV } = await db.from("verificacoes").select("dados").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle();
-    const podeRepetir = !ultV || !ultV.dados?.ia || ultV.dados.ia.erro || (ultV.dados.versao || 0) < 4;
-    if (!podeRepetir && Date.now() - Date.parse(c.ultima_verificacao) < 10 * 60 * 1000)
-      return resp({ erro: "Essa concorrente foi verificada há poucos minutos. Tente de novo daqui a pouco." }, 429);
+    const podeRepetir = !ultV || !ultV.dados?.ia || ultV.dados.ia.erro || (ultV.dados.versao || 0) < 6;
+    const espera = p.id === "gratis" ? 60 : 10; // minutos entre verificações manuais
+    if (!podeRepetir && Date.now() - Date.parse(c.ultima_verificacao) < espera * 60 * 1000)
+      return resp({ erro: p.id === "gratis" ? "No plano Grátis dá para verificar de novo 1 vez por hora. Nos planos pagos, a cada 10 minutos." : "Essa concorrente foi verificada há poucos minutos. Tente de novo daqui a pouco." }, 429);
     return resp(await verificar(c));
   } catch (e) {
     return resp({ erro: e instanceof Error ? e.message : String(e) }, 500);
