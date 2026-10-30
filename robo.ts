@@ -19,7 +19,7 @@ const GEMINI_KEY = env("GEMINI_API_KEY");
 const CRON_SECRET = env("CRON_SECRET");
 const IG_TOKEN = env("IG_TOKEN");
 const IG_USER_ID = env("IG_USER_ID");
-const GRAPH = "https://graph.facebook.com/" + (env("IG_GRAPH_VERSION") || "v23.0");
+const GRAPH = "https://graph.facebook.com/" + (env("IG_GRAPH_VERSION") || "v26.0");
 const MODELOS = [env("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-flash-latest"].filter(Boolean);
 const SEIS_HORAS = 6 * 3600 * 1000;
 const POR_RODADA = 4;
@@ -191,7 +191,7 @@ async function lerSite(site: string) {
     if (desc) promocoes.push(corta(desc[0].trim(), 60));
 
     let precos = produtos.map((p) => p.preco || 0).filter((v) => v > 0);
-    if (precos.length < 3) precos = [...texto.matchAll(/R\$\s?(\d{1,3}(?:\.\d{3})*(?:,\d{2})|\d+,\d{2})/g)].map((m) => num(m[1])).filter((v) => v >= 5 && v < 50000);
+    if (precos.length < 3) precos = [...texto.replace(/\d{1,2}\s?x\s?(de\s?)?R\$\s?[\d.,]+/gi, " ").replace(/(acima|compras|pedidos|frete|a partir)[^R]{0,25}R\$\s?[\d.,]+/gi, " ").matchAll(/R\$\s?(\d{1,3}(?:\.\d{3})*(?:,\d{2})|\d+,\d{2})/g)].map((m) => num(m[1])).filter((v) => v >= 5 && v < 50000);
     precos.sort((a, b) => a - b);
     const faixa = precos.length ? { min: precos[0], max: precos[precos.length - 1], mediana: precos[Math.floor(precos.length / 2)], quantidade: precos.length } : null;
 
