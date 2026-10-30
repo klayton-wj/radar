@@ -429,9 +429,10 @@ function montaPrompt(loja: any, minhaIg: any, c: any, site: any, ig: any, mudanc
     produtos: site.produtos.slice(0, 15).map((p: any) => ({ nome: p.nome, preco: p.preco, de: p.de, desconto: p.desconto })),
     texto: site.amostra?.slice(0, 2500),
   }) : "Site não disponível nesta leitura.";
-  return `Você é um consultor de marketing para pequenas lojas de roupa no Brasil. Português do Brasil, frases curtas, tom prático.
+  return `Você é um consultor de marketing para pequenos negócios no Brasil (lojas físicas e online de qualquer nicho). Português do Brasil, frases curtas, tom prático.
 
-MINHA LOJA: ${loja?.nome_fantasia || "-"} | ${loja?.segmento || "-"} | ${loja?.cidade || "-"} | Instagram ${loja?.instagram || "-"}
+MINHA LOJA: ${lojaTxt(loja)}
+${ADAPTA}
 Sobre: ${loja?.descricao || "-"}
 Meus números: ${minhaIg?.ok ? `${minhaIg.seguidores} seguidores, ${minhaIg.posts_semana} posts/semana, engajamento ${minhaIg.engajamento}%` : `${loja?.seguidores ?? "?"} seguidores (informado no cadastro)`}
 
@@ -532,7 +533,9 @@ async function contexto(uid: string) {
   const meu = loja?.instagram ? await lerInstagram(loja.instagram, 36) : { ok: false } as any;
   return { loja, conc, meu };
 }
-const lojaTxt = (l: any) => `${l?.nome_fantasia || "-"} | segmento ${l?.segmento || "-"} | ${l?.cidade || "-"} | Instagram ${l?.instagram || "-"} | sobre: ${l?.descricao || "-"}`;
+const modoTxt = (m: string) => ({ fisica: "loja física", online: "loja online", ambas: "loja física e online" } as any)[m] || "modalidade não informada";
+const lojaTxt = (l: any) => `${l?.nome_fantasia || "-"} | nicho: ${l?.segmento || "-"} | ${modoTxt(l?.modalidade)} | ${l?.cidade || "-"} | Instagram ${l?.instagram || "-"} | sobre: ${l?.descricao || "-"}`;
+const ADAPTA = "Adapte tudo ao nicho e à modalidade da loja: loja física pede ações locais (vitrine, Google Maps, WhatsApp, eventos no bairro, retirada); loja online pede frete, anúncios, prova social e conversão no site; restaurantes e serviços pedem agendamento, delivery e bastidores.";
 const meuTxt = (m: any) => m?.ok ? JSON.stringify({ seguidores: m.seguidores, posts_semana: m.posts_semana, engajamento_pct: m.engajamento, ultimo_post_dias: m.ultimo_post_dias,
   ritmo: m.ritmo, bio: m.bio, posts: m.posts.slice(0, 20).map((p: any) => ({ tipo: p.tipo, legenda: corta(p.legenda || "", 160), curtidas: p.curtidas, comentarios: p.comentarios, vezes_media: p.vezes_media, data: p.data?.slice(0, 10) })) })
   : "Instagram da loja não disponível (conta pessoal ou não informada).";
@@ -542,7 +545,7 @@ const salva = (uid: string, tipo: string, chave: string, dados: any) =>
 async function analisarPerfil(uid: string) {
   const { loja, conc, meu } = await contexto(uid);
   if (!meu.ok) return { erro: meu.erro === "instagram_nao_conectado" ? "O Instagram ainda não foi conectado ao Radar." : "Não conseguimos ler o Instagram da sua loja. Ele precisa ser uma conta Comercial ou de Criador. Confira o @ em Minha loja." };
-  const ia = await gemini(`Você é um estrategista de Instagram para lojas de moda no Brasil. Português do Brasil, direto e prático.
+  const ia = await gemini(`Você é um estrategista de Instagram para pequenos negócios no Brasil (qualquer nicho, físico ou online). ${ADAPTA} Português do Brasil, direto e prático.
 MINHA LOJA: ${lojaTxt(loja)}
 MEU INSTAGRAM (dados reais): ${meuTxt(meu)}
 CONCORRENTES (dados reais): ${JSON.stringify(conc.map((c) => ({ nome: c.nome, seguidores: c.seguidores, engajamento: c.engajamento, posts_semana: c.posts_semana, top_posts: c.top_posts })))}
@@ -562,7 +565,7 @@ async function gerarCalendario(uid: string, datas: any[]) {
   const nicho: Record<string, { posts: number; soma: number }> = {};
   conc.forEach((c) => (c.ritmo?.dias || []).forEach((d: any) => { nicho[d.dia] = nicho[d.dia] || { posts: 0, soma: 0 }; nicho[d.dia].posts += d.posts; nicho[d.dia].soma += d.media * d.posts; }));
   const diasNicho = Object.entries(nicho).map(([dia, v]) => ({ dia, posts: v.posts, media: v.posts ? Math.round(v.soma / v.posts) : 0 }));
-  const ia = await gemini(`Você é social media de lojas de moda no Brasil. Monte o calendário de postagens da PRÓXIMA SEMANA (segunda a sábado) para a minha loja.
+  const ia = await gemini(`Você é social media de pequenos negócios no Brasil (qualquer nicho, físico ou online). ${ADAPTA} Monte o calendário de postagens da PRÓXIMA SEMANA (segunda a sábado) para a minha loja.
 MINHA LOJA: ${lojaTxt(loja)}
 MEU INSTAGRAM: ${meuTxt(meu)}
 DIAS QUE MAIS ENGAJAM NO NICHO (concorrentes, dados reais): ${JSON.stringify(diasNicho)}
@@ -580,7 +583,7 @@ Responda APENAS com este JSON:
 
 async function reescreverLegenda(uid: string, legenda: string, concorrente: string, tipo: string) {
   const { data: loja } = await db.from("empresas").select("*").eq("user_id", uid).maybeSingle();
-  return await gemini(`Você é copywriter de Instagram para lojas de moda no Brasil.
+  return await gemini(`Você é copywriter de Instagram para pequenos negócios no Brasil. ${ADAPTA}
 Esta legenda de ${concorrente || "uma concorrente"} (post em ${tipo || "formato não informado"}) teve muito mais engajamento que a média dela:
 """${String(legenda || "").slice(0, 1500)}"""
 MINHA LOJA: ${lojaTxt(loja)}
@@ -593,7 +596,7 @@ Responda APENAS com este JSON:
 
 async function gerarCampanha(uid: string, data: any) {
   const { loja, conc } = await contexto(uid);
-  const ia = await gemini(`Você é estrategista de varejo de moda no Brasil. Monte uma campanha para a data comercial abaixo.
+  const ia = await gemini(`Você é estrategista de varejo e marketing local no Brasil (qualquer nicho, físico ou online). ${ADAPTA} Monte uma campanha para a data comercial abaixo.
 DATA: ${data?.nome} em ${data?.data} (faltam ${data?.faltam} dias). Hoje é ${hoje()}.
 MINHA LOJA: ${lojaTxt(loja)}
 CONCORRENTES (dados reais: posts recentes, o que mais engajou, promoções no site): ${JSON.stringify(conc.map((c) => ({ nome: c.nome, top_posts: c.top_posts, posts_recentes: c.posts_recentes.slice(0, 12), promocoes: c.promocoes, preco_tipico: c.preco_tipico })))}
