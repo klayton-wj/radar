@@ -182,6 +182,23 @@ button{cursor:pointer}
 @keyframes mup{from{transform:translateY(20px) scale(.97);opacity:.5}}
 canvas#conf{position:fixed;inset:0;pointer-events:none;z-index:70}
 .ill{font-size:11px;color:var(--muted);font-style:italic}
+
+/* ---- correções de layout (textos longos, telas pequenas) ---- */
+main.page,.modal,#modalBox{overflow-wrap:anywhere}
+.two>*,.cgrid>*,.cal>*,.posts>*,.kpis>*,.planos>*,.feed>*,.acts>*,.tipos>*,.modos>*{min-width:0}
+.card,.post,.post .tx,.act>div,.ev>.fl{min-width:0}
+.row>.fl,.row>span,.row>b,.row>p,.row>a{min-width:0}
+.chip{white-space:normal;max-width:100%;overflow-wrap:anywhere;text-align:left}
+.relhead .row,.ph{flex-wrap:wrap}
+.meta{display:grid;gap:2px}.meta .mt-t{font-weight:700}.meta .mt-v{font-size:16px;line-height:1.35}
+.kpi b{overflow-wrap:normal;word-break:keep-all;line-height:1.1;font-size:clamp(20px,6.5vw,30px)}
+[style*="overflow-x:auto"]>.tbl{min-width:460px}
+.code{display:grid;grid-template-columns:repeat(6,minmax(0,46px));gap:6px}.code input{width:100%;min-width:0;padding:0}
+.btn{max-width:100%}.card .btn,.ph .btn{white-space:normal;text-align:center}
+@media(max-width:400px){.top .me .btn span{display:none}.top .me{gap:6px}.top .wrap{gap:8px}}.tbl th{white-space:nowrap}.tbl td{overflow-wrap:normal}
+.relhead .fl{min-width:170px}
+.tbl td,.tbl th{overflow-wrap:anywhere}
+img,svg{max-width:100%}
 </style>
 
 <div id="root"></div>
@@ -191,9 +208,9 @@ canvas#conf{position:fixed;inset:0;pointer-events:none;z-index:70}
 
 <script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
-<script src="app.js?v=11"></script>
-<script src="app2.js?v=11"></script>
-<script src="app3.js?v=11"></script>
+<script src="app.js?v=12"></script>
+<script src="app2.js?v=12"></script>
+<script src="app3.js?v=12"></script>
 <script>setTimeout(function(){if(!window.RADAR_OK){var r=document.getElementById('root')||document.body;r.innerHTML='<div style="min-height:100vh;display:grid;place-items:center;padding:24px;text-align:center;font-family:system-ui"><div><h2>Os arquivos do Radar (app.js, app2.js, app3.js) não carregaram completos</h2><p style="color:#666">Envie de novo app.js, app2.js e app3.js para o GitHub e confira os tamanhos.</p><button onclick="location.reload()" style="margin-top:12px;padding:12px 18px;border:0;border-radius:12px;background:#d62976;color:#fff;font-weight:800">Recarregar</button></div></div>'}},4000)</script>
 
 </body></html>
