@@ -109,6 +109,68 @@ function deJsonLd(html: string, base: string): Produto[] {
   return out;
 }
 
+// lojas VTEX: catálogo público
+async function deVtex(html: string, base: string): Promise<Produto[]> {
+  if (!/vtex/i.test(html)) return [];
+  try {
+    const r = await baixa(new URL("/api/catalog_system/pub/products/search?_from=0&_to=23&O=OrderByReleaseDateDESC", base).href, 12000);
+    const j = JSON.parse(r.txt);
+    return (Array.isArray(j) ? j : []).map((p: any) => {
+      const it = (p.items || [])[0] || {}, of = ((it.sellers || [])[0] || {}).commertialOffer || {};
+      const preco = Number(of.Price) || null, de = Number(of.ListPrice) > Number(of.Price) ? Number(of.ListPrice) : null;
+      return { nome: limpa(p.productName || ""), foto: ((it.images || [])[0] || {}).imageUrl || "", preco, de,
+        desconto: de && preco ? Math.round((1 - preco / de) * 100) : null, link: p.link || "" };
+    });
+  } catch { return []; }
+}
+// lojas WooCommerce: Store API pública
+async function deWoo(html: string, base: string): Promise<Produto[]> {
+  if (!/woocommerce|wp-content/i.test(html)) return [];
+  try {
+    const r = await baixa(new URL("/wp-json/wc/store/v1/products?per_page=24&orderby=date", base).href, 12000);
+    const j = JSON.parse(r.txt);
+    return (Array.isArray(j) ? j : []).map((p: any) => {
+      const pr = p.prices || {}, div = Math.pow(10, Number(pr.currency_minor_unit ?? 2));
+      const preco = Number(pr.price) / div || null, regular = Number(pr.regular_price) / div;
+      const de = regular > (preco || 0) ? regular : null;
+      return { nome: limpa(p.name || ""), foto: ((p.images || [])[0] || {}).src || "", preco, de,
+        desconto: de && preco ? Math.round((1 - preco / de) * 100) : null, link: p.permalink || "" };
+    });
+  } catch { return []; }
+}
+// qualquer loja: lê páginas de produto listadas no sitemap (dados estruturados de cada produto)
+async function deSitemap(base: string): Promise<Produto[]> {
+  try {
+    const origem = new URL(base).origin;
+    const urls: string[] = [];
+    const robots = await baixa(origem + "/robots.txt", 8000).catch(() => null);
+    const mapas = [...((robots?.txt || "").matchAll(/^sitemap:\s*(\S+)/gim))].map((m) => m[1]);
+    if (!mapas.length) mapas.push(origem + "/sitemap.xml");
+    const fila = [...mapas];
+    for (let i = 0; i < fila.length && i < 6 && urls.length < 200; i++) {
+      const x = await baixa(fila[i], 10000).catch(() => null);
+      if (!x?.ok) continue;
+      const locs = [...x.txt.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map((m) => entidades(m[1]));
+      if (/<sitemapindex/i.test(x.txt)) {
+        locs.sort((a, b) => (/product|produto/i.test(b) ? 1 : 0) - (/product|produto/i.test(a) ? 1 : 0)).slice(0, 4).forEach((l) => fila.push(l));
+      } else urls.push(...locs);
+    }
+    const prod = urls.filter((u) => /\/(p|produto|produtos|product|products)\/|\/p$|\/p\?|-p\d+|\.html$/i.test(u)).slice(-200);
+    const escolha = (prod.length ? prod : urls).slice(-10).reverse(); // os mais recentes costumam vir no fim
+    const pags = await Promise.all(escolha.slice(0, 8).map((u) => baixa(u, 9000).catch(() => null)));
+    const out: Produto[] = [];
+    pags.forEach((pg, i) => {
+      if (!pg?.ok) return;
+      const j = deJsonLd(pg.txt, pg.url)[0];
+      const meta = (n: string) => limpa((pg.txt.match(new RegExp(`<meta[^>]+(?:property|name)=["']${n}["'][^>]*content=["']([^"']*)`, "i")) || [])[1] || "");
+      const nome = j?.nome || meta("og:title"), foto = j?.foto || abs(meta("og:image"), pg.url);
+      const preco = j?.preco || num(meta("product:price:amount") || meta("og:price:amount")) || null;
+      if (nome && foto) out.push({ nome: corta(nome, 80), foto, preco, de: null, desconto: null, link: escolha[i] });
+    });
+    return out;
+  } catch { return []; }
+}
+
 async function deShopify(html: string, base: string): Promise<Produto[]> {
   if (!/cdn\.shopify\.com|Shopify\.theme/i.test(html)) return [];
   try {
@@ -169,7 +231,16 @@ async function lerSite(site: string) {
     const texto = limpa(semScript);
 
     // produtos: junta as fontes e tira repetidos
-    const todos = [...deJsonLd(html, base), ...(await deShopify(html, base)), ...deCartoes(semScript, base)];
+    let todos = [...deJsonLd(html, base), ...(await deShopify(html, base)), ...deCartoes(semScript, base)];
+    let fonte = "pagina";
+    if (todos.filter((p) => p.foto).length < 3) {
+      const extra = [...(await deVtex(html, base)), ...(await deWoo(html, base))];
+      if (extra.length) { todos = [...todos, ...extra]; fonte = "api_da_loja"; }
+    }
+    if (todos.filter((p) => p.foto).length < 3) {
+      const sm = await deSitemap(base);
+      if (sm.length) { todos = [...todos, ...sm]; fonte = "paginas_de_produto"; }
+    }
     const vistos = new Set<string>();
     const produtos = todos.filter((p) => {
       const k = p.nome.toLowerCase().slice(0, 50);
@@ -197,7 +268,7 @@ async function lerSite(site: string) {
 
     return {
       ok: true, status: r.status, url: base, titulo, descricao, capa, titulos, promocoes: [...new Set(promocoes)].slice(0, 8),
-      produtos, em_promocao: comDesc.length, faixa_precos: faixa, amostra: texto.slice(0, 5000),
+      produtos, fonte, em_promocao: comDesc.length, faixa_precos: faixa, amostra: texto.slice(0, 5000),
       assinatura: await hash(titulo + titulos.join("|") + produtos.map((p) => p.nome + p.preco).join("|") + promocoes.join("|")),
     };
   } catch (e) {
@@ -256,7 +327,7 @@ async function lerInstagram(usuario: string, limite = 24) {
       ok: true, usuario: b.username, nome: b.name, bio: b.biography || "", site: b.website || "", foto: b.profile_picture_url || "",
       seguidores: seg, seguindo: b.follows_count || 0, total_posts: b.media_count || 0,
       posts_semana: datas.length ? +(datas.length / semanas).toFixed(1) : 0, ultimo_post_dias, engajamento: seg ? +((media / seg) * 100).toFixed(2) : 0,
-      interacoes_media: Math.round(media), tipos, ritmo: ritmo(posts), posts,
+      interacoes_media: Math.round(media), curtidas_ocultas: ult.length > 0 && ult.filter((p: any) => p.curtidas == null).length >= ult.length / 2, tipos, ritmo: ritmo(posts), posts,
     };
   } catch (e) {
     return { ok: false, usuario: u, erro: e instanceof Error ? e.message : String(e) };
@@ -313,26 +384,39 @@ async function modelosDisponiveis() {
     const ver = (n: string) => Number((n.match(/(\d+(?:\.\d+)?)/) || [0, 0])[1]);
     return (j.models || []).filter((m: any) => (m.supportedGenerationMethods || []).includes("generateContent"))
       .map((m: any) => String(m.name).replace(/^models\//, ""))
-      .filter((n: string) => /flash/i.test(n) && !/(image|tts|audio|live|embedding|vision|exp|preview|8b)/i.test(n))
+      .filter((n: string) => /flash/i.test(n) && !/(image|tts|audio|live|embedding|vision|exp|8b)/i.test(n) && !/preview/i.test(n))
       .sort((a: string, b: string) => ver(b) - ver(a) || (/lite/.test(a) ? 1 : 0) - (/lite/.test(b) ? 1 : 0));
   } catch { return []; }
 }
-async function gemini(prompt: string) {
+const esgotado: Record<string, number> = {}; // modelo -> até quando evitar (cota estourada / sobrecarga)
+let listaCache: { em: number; lista: string[] } = { em: 0, lista: [] };
+async function gemini(prompt: string, leve = false) {
   if (!GEMINI_KEY) return { erro: "GEMINI_API_KEY não configurada" };
-  const erros: string[] = [], tentados = new Set<string>();
-  const tenta = async (lista: string[]) => {
-    for (const m of lista) {
-      if (!m || tentados.has(m)) continue;
-      tentados.add(m);
-      for (const json of [true, false]) {
-        try { const r = await chamaModelo(m, prompt, json); modeloBom = m; return r; }
-        catch (e) { erros.push(String(e instanceof Error ? e.message : e)); if (!/formato/.test(String(e))) break; }
+  if (Date.now() - listaCache.em > 3600e3) listaCache = { em: Date.now(), lista: await modelosDisponiveis() };
+  const todos = listaCache.lista;
+  const cheios = todos.filter((n) => !/lite/i.test(n)).slice(0, 3), lites = todos.filter((n) => /lite/i.test(n)).slice(0, 3);
+  const base = [env("GEMINI_MODEL"), modeloBom, ...MODELOS.slice(1)].filter(Boolean);
+  // rotina automática usa primeiro os modelos "lite" (cota grátis bem maior); pedidos do usuário usam primeiro os completos
+  const ordem = [...new Set(leve ? [...lites, ...base, ...cheios] : [...base, ...cheios, ...lites])]
+    .filter((m) => !(esgotado[m] > Date.now())).slice(0, 7);
+  const erros: string[] = [];
+  let soCota = true;
+  for (const m of ordem) {
+    for (const json of [true, false]) {
+      try { const r = await chamaModelo(m, prompt, json); if (!/lite/i.test(m)) modeloBom = m; return r; }
+      catch (e) {
+        const msg = String(e instanceof Error ? e.message : e);
+        erros.push(msg);
+        if (/quota|exceeded|rate limit|RESOURCE_EXHAUSTED/i.test(msg)) esgotado[m] = Date.now() + 30 * 60e3;
+        else if (/high demand|overloaded|unavailable|503/i.test(msg)) { esgotado[m] = Date.now() + 5 * 60e3; soCota = false; }
+        else soCota = false;
+        if (!/formato/.test(msg)) break;
       }
     }
-    return null;
-  };
-  return (await tenta([modeloBom, ...MODELOS])) || (await tenta((await modelosDisponiveis()).slice(0, 4)))
-    || { erro: erros.slice(-3).join(" | ") || "nenhum modelo disponível" };
+  }
+  if (!erros.length) return { erro: "Todos os modelos da IA estão no limite agora. Tente de novo em alguns minutos." };
+  if (soCota) return { erro: "O limite diário gratuito da IA (Google Gemini) acabou por hoje. Ele volta amanhã — ou ative o faturamento no Google AI Studio para não ter limite." };
+  return { erro: "A IA está sobrecarregada agora. Tente de novo em alguns minutos. (" + corta(erros.slice(-2).join(" | "), 240) + ")" };
 }
 
 function montaPrompt(loja: any, minhaIg: any, c: any, site: any, ig: any, mudancas: string[]) {
@@ -395,7 +479,7 @@ async function verificar(c: any) {
   const mesmaCoisa = ant?.dados?.assinatura === assinatura && ant?.dados?.ia && !ant.dados.ia.erro;
   const ia = !temDado ? { erro: "sem_dados" }
     : mesmaCoisa ? { ...ant!.dados.ia, reaproveitado: true }
-    : await gemini(montaPrompt(loja, minhaIg, c, site, ig, mudancas));
+    : await gemini(montaPrompt(loja, minhaIg, c, site, ig, mudancas), true);
   const { amostra: _a, ...siteSalvo } = site as any;
   const dados = { versao: 4, site: siteSalvo, instagram: ig, minha_loja: minhaIg, anuncios: { biblioteca: bibliotecaAnuncios(c) }, mudancas, ia, assinatura };
   const agora = new Date().toISOString();
