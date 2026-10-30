@@ -429,8 +429,8 @@ function renderLista(){return '<div class="ph"><div><span class="lbl">Concorrent
 
 /* ====================== DADOS REAIS (nuvem) ====================== */
 const V=c=>c&&c.v||{};
-const IG=c=>{const g=V(c).instagram;return g&&g.ok?g:null};
-const SITE=c=>{const s=V(c).site;return s&&s.ok?s:null};
+const IG=c=>{const g=V(c).instagram;if(!g||!g.ok)return null;g.posts=Array.isArray(g.posts)?g.posts:[];g.seguidores=+g.seguidores||0;g.posts_semana=+g.posts_semana||0;g.engajamento=+g.engajamento||0;g.interacoes_media=+g.interacoes_media||0;return g};
+const SITE=c=>{const s=V(c).site;if(!s||!s.ok)return null;s.promocoes=Array.isArray(s.promocoes)?s.promocoes:[];s.produtos=Array.isArray(s.produtos)?s.produtos:[];s.titulos=Array.isArray(s.titulos)?s.titulos:[];return s};
 function minhaIG(){for(const c of conc){const m=V(c).minha_loja;if(m&&m.ok)return m}return null}
 const reais=v=>'R$ '+Number(v).toFixed(2).replace('.',',').replace(/\B(?=(\d{3})+(?!\d),)/g,'.');
 const quando=t=>{const h=Math.max(0,Math.round((Date.now()-Date.parse(t))/36e5));return h<1?'agora há pouco':h<24?'há '+h+' h':'há '+Math.round(h/24)+' dias'};
@@ -541,5 +541,4 @@ document.addEventListener('click',e=>{const t=e.target.closest('button,[data-act
  if(d.del){const c=conc.find(x=>x.id===d.del);confirmModal('Remover '+esc(c.nome)+'?','Ela sai do seu radar e o histórico é apagado.','Remover',async()=>{if(!(await nuvem('apagar',c)))return;conc=conc.filter(x=>x.id!==c.id);save();go('concorrentes');toast('Concorrente removida')});return}
  if(d.ctab){cTab=d.ctab;const id=location.hash.split('/')[1];shell('conc',renderConc(id));if(d.ctab==='rebater'||e.target.closest('.tabs'))$('ctab').scrollIntoView({block:'nearest'});return}
  if(d.check){const c=conc.find(x=>x.id===d.check);t.disabled=true;t.innerHTML='<span class="spin"></span>Verificando…';document.querySelector('.hero').classList.add('scan');
- if(CLOUD){(async()=>{const r=await verificarNuvem(c.id);if(location.hash==='#c/'+c.id)route();toast(r.erro?r.erro:(r.ia_ok?'Pronto! A IA leu o site e atualizou o resumo.':r.site_ok?'Site lido, mas a IA não respondeu. Tente mais tarde.':'Esse site bloqueou a leitura automática.'))})();return}setTimeout(async()=>{c.check=Date.now();delete c._d;c._seed=(c._seed||0)+1;await nuvem('check',c);save();route();toast('Verificação concluída: dados atualizados')},reduce?100:2200);return}
- if(d.roteiro){const c=conc.find(x=>x.id===d.roteiro),dd=dados(c);const top=dd.posts.slice().sort((a,b)=>b.mult-a.mult)[0];$('r
+ if(CLOUD){(async()=>{const r=await verificarNuvem(c.id);if(location.hash==='#c/'+c.id)route();toast(r.erro?r.erro:(r.ia_ok?'Pronto! A IA leu o site e atualizou o resumo.':r.site_ok?'Site lido, mas a IA não respondeu. Tente mais tarde.':'Esse site bloq
