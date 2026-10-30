@@ -903,9 +903,36 @@ async function assinar(uid: string, email: string, planoId: string) {
   await db.from("assinaturas").upsert({ user_id: uid, plano: (await planoDe(uid)).id, status: "ativa", mp_preapproval_id: null, atualizado_em: new Date().toISOString() }, { onConflict: "user_id", ignoreDuplicates: true });
   return { link: pre.init_point, id: pre.id };
 }
+// pacotes de vagas extras: cada compra é uma assinatura própria ("uid|extra|pacote")
+async function assinarExtra(uid: string, email: string, pacoteId: string) {
+  if (!MP_TOKEN) return { erro: "O pagamento ainda não foi configurado no Radar." };
+  const { data: k } = await db.from("pacotes").select("*").eq("id", pacoteId).eq("ativo", true).maybeSingle();
+  if (!k) return { erro: "Pacote inválido." };
+  await db.from("extras").delete().eq("user_id", uid).eq("status", "pendente").lt("criado_em", new Date(Date.now() - 86400e3).toISOString());
+  const pre = await mp("/preapproval", "POST", {
+    reason: `Radar · ${k.nome}`, external_reference: `${uid}|extra|${k.id}`, payer_email: email, back_url: SITE_URL + "app.html#planos",
+    auto_recurring: { frequency: 1, frequency_type: "months", transaction_amount: Number(k.preco), currency_id: "BRL" }, status: "pending",
+  });
+  await db.from("extras").insert({ user_id: uid, pacote: k.id, quantidade: k.quantidade, status: "pendente", mp_preapproval_id: pre.id });
+  return { link: pre.init_point, id: pre.id };
+}
+async function sincronizaExtra(pre: any, uid: string, pacoteId: string) {
+  const { data: k } = await db.from("pacotes").select("quantidade").eq("id", pacoteId).maybeSingle();
+  const st = pre.status;
+  const linha: any = { user_id: uid, pacote: pacoteId, quantidade: k?.quantidade || 1, mp_preapproval_id: pre.id, atualizado_em: new Date().toISOString() };
+  if (st === "authorized") {
+    linha.status = "ativa";
+    linha.valido_ate = pre.next_payment_date ? new Date(Date.parse(pre.next_payment_date) + 5 * 86400e3).toISOString() : null;
+  } else if (st === "cancelled" || st === "paused") linha.status = "cancelada";
+  else return { uid, status: st, extra: true };
+  await db.from("extras").upsert(linha, { onConflict: "mp_preapproval_id" });
+  return { uid, status: st, extra: true };
+}
 async function sincronizaAssinatura(preId: string) {
   const pre = await mp("/preapproval/" + preId);
-  const [uid, planoId] = String(pre.external_reference || "").split("|");
+  const partes = String(pre.external_reference || "").split("|");
+  if (partes[1] === "extra" && partes[0] && partes[2]) return await sincronizaExtra(pre, partes[0], partes[2]);
+  const [uid, planoId] = partes;
   if (!uid || !planoId) return { ignorado: true };
   const st = pre.status; // pending | authorized | paused | cancelled
   if (st === "authorized") {
@@ -946,8 +973,9 @@ Deno.serve(async (req: Request) => {
 
     // agendador
     if (CRON_SECRET && req.headers.get("x-cron-secret") === CRON_SECRET) {
+      await db.rpc("vencer_assinaturas").then(() => {}, () => {});
       const limite = new Date(Date.now() - SEIS_HORAS + 5 * 60 * 1000).toISOString();
-      const { data: candidatos, error } = await db.from("concorrentes").select("*")
+      const { data: candidatos, error } = await db.from("concorrentes").select("*").eq("pausada", false)
         .lte("ultima_verificacao", limite).order("ultima_verificacao", { ascending: true }).limit(40);
       if (error) return resp({ erro: error.message }, 500);
       const lista: any[] = [];
@@ -978,11 +1006,23 @@ Deno.serve(async (req: Request) => {
 
     if (body.acao === "apagar_conta") {
       const { data: a } = await db.from("assinaturas").select("mp_preapproval_id").eq("user_id", uid).maybeSingle();
-      if (a?.mp_preapproval_id && MP_TOKEN) { try { await mp("/preapproval/" + a.mp_preapproval_id, "PUT", { status: "cancelled" }); } catch { /* segue */ } }
+      const { data: ex } = await db.from("extras").select("mp_preapproval_id").eq("user_id", uid).in("status", ["ativa", "pendente"]);
+      const ids = [a?.mp_preapproval_id, ...(ex || []).map((x: any) => x.mp_preapproval_id)].filter(Boolean);
+      if (MP_TOKEN) for (const id of ids) { try { await mp("/preapproval/" + id, "PUT", { status: "cancelled" }); } catch { /* segue */ } }
       const { error } = await db.auth.admin.deleteUser(uid);
       return error ? resp({ erro: error.message }, 500) : resp({ ok: true });
     }
     if (body.acao === "assinar") return resp(await assinar(uid, u.user.email || "", body.plano));
+    if (body.acao === "assinar_extra") return resp(await assinarExtra(uid, u.user.email || "", body.pacote));
+    if (body.acao === "cancelar_extra") {
+      const { data: x } = await db.from("extras").select("*").eq("id", body.extra_id).eq("user_id", uid).maybeSingle();
+      if (!x) return resp({ erro: "Pacote não encontrado." }, 404);
+      if (x.mp_preapproval_id && MP_TOKEN) {
+        try { await mp("/preapproval/" + x.mp_preapproval_id, "PUT", { status: "cancelled" }); } catch { /* já cancelado */ }
+      }
+      await db.from("extras").update({ status: "cancelada", atualizado_em: new Date().toISOString() }).eq("id", x.id);
+      return resp({ ok: true });
+    }
     if (body.acao === "cancelar_assinatura") {
       const { data: a } = await db.from("assinaturas").select("mp_preapproval_id").eq("user_id", uid).maybeSingle();
       if (!a?.mp_preapproval_id) return resp({ erro: "Não há assinatura paga ativa." });
@@ -1023,6 +1063,7 @@ Deno.serve(async (req: Request) => {
     if (!body.concorrente_id) return resp({ erro: "concorrente_id faltando" }, 400);
     const { data: c } = await db.from("concorrentes").select("*").eq("id", body.concorrente_id).eq("user_id", uid).maybeSingle();
     if (!c) return resp({ erro: "Concorrente não encontrada." }, 404);
+    if (c.pausada) return resp({ erro: "Esta concorrente está pausada porque passou do limite do seu plano. Compre vagas extras ou mude de plano para voltar a ler.", pausada: true }, 403);
     const { data: ultV } = await db.from("verificacoes").select("dados").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle();
     const podeRepetir = !ultV || !ultV.dados?.ia || ultV.dados.ia.erro || (ultV.dados.versao || 0) < 6;
     const espera = p.id === "gratis" ? 60 : 10; // minutos entre verificações manuais
