@@ -401,6 +401,11 @@ Deno.serve(async (req: Request) => {
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
     const { data: u } = await db.auth.getUser(token);
     if (!u?.user) return resp({ erro: "Faça login de novo." }, 401);
+    if (body.acao === "apagar_conta") {
+      // apaga o login; perfis, empresas, concorrentes e verificações saem junto (on delete cascade)
+      const { error } = await db.auth.admin.deleteUser(u.user.id);
+      return error ? resp({ erro: error.message }, 500) : resp({ ok: true });
+    }
     if (!body.concorrente_id) return resp({ erro: "concorrente_id faltando" }, 400);
     const { data: c } = await db.from("concorrentes").select("*").eq("id", body.concorrente_id).eq("user_id", u.user.id).maybeSingle();
     if (!c) return resp({ erro: "Concorrente não encontrada." }, 404);
