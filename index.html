@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}</style></head><body>
 <title>Radar de Concorrência</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="Radar de Concorrência para lojas de roupa: acompanhe o Instagram, os sites e as avaliações das concorrentes e receba ideias prontas com IA.">
+<meta name="description" content="Radar de Concorrência para lojas e negócios de todos os nichos, físicos e online: acompanhe o Instagram e o site das concorrentes e receba ideias prontas com IA.">
 <meta name="theme-color" content="#ffffff">
 <style>
 /* Layout: página de vendas em seções empilhadas; hero com celular mostrando alertas ao vivo; planos em 3 colunas; tudo escuro, na mesma identidade do painel */
@@ -117,6 +117,7 @@ footer{padding-block:30px 40px;color:var(--muted);font-size:13px;display:flex;fl
 .rv{transition:transform .7s cubic-bezier(.2,.8,.2,1),opacity .7s}
 .js .rv:not(.in){transform:translateY(24px);opacity:.25}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.js .rv{transform:none!important;opacity:1!important}html{scroll-behavior:auto}}
+.nichos{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}.nichos span{font-size:12.5px;font-weight:800;padding:6px 10px;border-radius:999px;background:#fff;border:1px solid #ececf3;color:#3b3b4a}
 </style>
 
 <header class="nav"><div class="wrap">
@@ -129,7 +130,7 @@ footer{padding-block:30px 40px;color:var(--muted);font-size:13px;display:flex;fl
   <div class="glow" aria-hidden="true"><i></i><i></i></div>
   <div class="wrap hgrid">
     <div>
-      <span class="lbl">Para lojas de roupa</span>
+      <span class="lbl">Para lojas de todos os nichos · físicas e online</span>
       <h1 style="margin-top:12px">Saiba o que suas concorrentes fazem <span class="grad">antes de todo mundo.</span></h1>
       <p class="sub">O Radar verifica o Instagram, o Facebook e o site das lojas concorrentes a cada 6 horas e te diz o que elas estão fazendo, como rebater os anúncios e quais metas de alcance seguir.</p>
       <div class="ctas">
@@ -137,6 +138,7 @@ footer{padding-block:30px 40px;color:var(--muted);font-size:13px;display:flex;fl
         <a class="btn sec" href="#como">Ver como funciona</a>
       </div>
       <div class="ticks"><span>Verificação a cada 6 horas</span><span>Instagram, Facebook e site</span><span>Sem instalar nada</span></div>
+      <div class="nichos" aria-label="Nichos atendidos"><span>👗 Moda</span><span>💄 Beleza</span><span>🍕 Restaurantes</span><span>🐶 Pet shop</span><span>🛋️ Casa e decoração</span><span>📱 Eletrônicos</span><span>🛒 Mercados</span><span>🚗 Automotivo</span><span>🧸 Infantil</span><span>💪 Fitness</span><span>💍 Joias</span><span>📚 Papelaria</span><span>✂️ Serviços</span></div>
     </div>
     <div class="phone" aria-label="Exemplo do painel do Radar mostrando alertas" role="img">
       <div class="scr">
@@ -211,7 +213,7 @@ footer{padding-block:30px 40px;color:var(--muted);font-size:13px;display:flex;fl
 document.documentElement.classList.add('js');
 const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
 /* alertas ao vivo no celular */
-const A=[['#F07A45','Post viral · Boutique Bella','Reels "1 calça, 3 looks" teve 11x a média','Gerar roteiro de Reels'],['#F0585F','Reclamações · Estilo Urbano','23 clientes pedem tamanhos G e GG','Criar post "temos todos os tamanhos"'],['#4B9DFF','Preço · Moda Leste Outlet','Black Friday antecipada: 30% off em jeans','Montar promoção de resposta'],['#2FE0C4','Produto novo · Boutique Bella','Coleção de linho com 12 peças','Ver peças lançadas'],['#E6B23A','Anúncio · Boutique Bella','Anunciando "troca fácil em 7 dias"','Gerar roteiro comparativo']];
+const A=[['#F07A45','Post viral · Pizzaria Forno Leste','Reels "a pizza de 1 metro" teve 11x a média','Gerar roteiro de Reels'],['#4B9DFF','Preço · Pet Amigo','Ração premium com 25% off no site','Montar promoção de resposta'],['#2FE0C4','Produto novo · Casa Bella Decor','12 luminárias novas na vitrine','Ver produtos lançados'],['#F0585F','Promoção · Tech Cell Store','Frete grátis em capinhas e películas','Criar oferta parecida'],['#E6B23A','Post viral · Studio Glow Beauty','Carrossel "antes e depois" com 6x a média','Reescrever legenda para mim']];
 const feed=document.getElementById('feed');let i=0;
 function push(){const a=A[i%A.length];i++;const el=document.createElement('div');el.className='al';el.style.setProperty('--c',a[0]);el.innerHTML='<small>'+a[1]+'</small><b>'+a[2]+'</b><em>✦ '+a[3]+'</em>';feed.prepend(el);while(feed.children.length>4)feed.lastChild.remove()}
 for(let k=0;k<3;k++)push();
