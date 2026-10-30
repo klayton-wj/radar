@@ -246,14 +246,16 @@ async function lerInstagram(usuario: string) {
     const inter = ult.map((p: any) => (p.curtidas || 0) + (p.comentarios || 0));
     const media = inter.length ? inter.reduce((a: number, x: number) => a + x, 0) / inter.length : 0;
     posts.forEach((p: any) => { p.vezes_media = media ? +(((p.curtidas || 0) + (p.comentarios || 0)) / media).toFixed(1) : null; });
-    const d28 = Date.now() - 28 * 86400e3;
-    const recentes = posts.filter((p: any) => Date.parse(p.data) > d28).length;
+    // frequência: posts por semana considerando o período dos últimos 12 posts (mínimo de 4 semanas)
+    const datas = ult.map((p: any) => Date.parse(p.data)).filter((t: number) => t > 0).sort((a: number, b: number) => b - a);
+    const semanas = datas.length > 1 ? Math.max(4, (Date.now() - datas[datas.length - 1]) / (7 * 86400e3)) : 4;
+    const ultimo_post_dias = datas.length ? Math.floor((Date.now() - datas[0]) / 86400e3) : null;
     const tipos: Record<string, number> = {};
     ult.forEach((p: any) => { tipos[p.tipo] = (tipos[p.tipo] || 0) + 1; });
     return {
       ok: true, usuario: b.username, nome: b.name, bio: b.biography || "", site: b.website || "", foto: b.profile_picture_url || "",
       seguidores: seg, seguindo: b.follows_count || 0, total_posts: b.media_count || 0,
-      posts_semana: +(recentes / 4).toFixed(1), engajamento: seg ? +((media / seg) * 100).toFixed(2) : 0,
+      posts_semana: datas.length ? +(datas.length / semanas).toFixed(1) : 0, ultimo_post_dias, engajamento: seg ? +((media / seg) * 100).toFixed(2) : 0,
       interacoes_media: Math.round(media), tipos, posts,
     };
   } catch (e) {
