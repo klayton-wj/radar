@@ -216,7 +216,29 @@ async function lerSite(site: string) {
   const url = urlDe(site);
   try {
     const r = await baixa(url);
-    if (!r.ok) return { ok: false, status: r.status, erro: "código " + r.status, url };
+    if (!r.ok) {
+      // página inicial bloqueada: tenta os caminhos públicos que a própria loja oferece (catálogo e mapa do site)
+      if ([401, 403, 429, 503].includes(r.status)) {
+        const base0 = r.url || url, todas = "vtex woocommerce cdn.shopify.com";
+        let prods = [...(await deShopify(todas, base0)), ...(await deVtex(todas, base0)), ...(await deWoo(todas, base0))];
+        let fonte = "api_da_loja";
+        if (prods.filter((p) => p.foto).length < 3) { prods = [...prods, ...(await deSitemap(base0))]; fonte = "paginas_de_produto"; }
+        const vistos = new Set<string>();
+        const produtos = prods.filter((p) => { const k = p.nome.toLowerCase().slice(0, 50); if (!p.nome || !p.foto || vistos.has(k)) return false; vistos.add(k); return true; }).slice(0, 24);
+        if (produtos.length) {
+          const precos = produtos.map((p) => p.preco || 0).filter((v) => v > 0).sort((a, b) => a - b);
+          const comDesc = produtos.filter((p) => p.desconto && p.desconto > 0).sort((a, b) => (b.desconto || 0) - (a.desconto || 0));
+          const promocoes = comDesc.slice(0, 5).map((p) => `${p.desconto}% OFF em ${corta(p.nome, 45)}`);
+          return {
+            ok: true, bloqueado: true, status: r.status, url: base0, titulo: "", descricao: "", capa: "", titulos: [], promocoes, produtos, fonte,
+            em_promocao: comDesc.length, faixa_precos: precos.length ? { min: precos[0], max: precos[precos.length - 1], mediana: precos[Math.floor(precos.length / 2)], quantidade: precos.length } : null,
+            amostra: produtos.map((p) => p.nome + (p.preco ? " R$ " + p.preco : "")).join(" | "),
+            assinatura: await hash(produtos.map((p) => p.nome + p.preco).join("|")),
+          };
+        }
+      }
+      return { ok: false, status: r.status, erro: "código " + r.status, url };
+    }
     const html = r.txt.slice(0, 2_000_000);
     const base = r.url;
     const semScript = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ")
