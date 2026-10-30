@@ -21,7 +21,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
-const MODELOS = [Deno.env.get("GEMINI_MODEL") || "gemini-flash-latest", "gemini-2.5-flash"];
+const MODELOS = [Deno.env.get("GEMINI_MODEL") || "", "gemini-3.8-flash", "gemini-flash-latest"].filter(Boolean);
 const SEIS_HORAS = 6 * 3600 * 1000;
 const POR_RODADA = 4;
 
@@ -113,25 +113,58 @@ function compara(antes: any, agora: any) {
 }
 
 // ---------------------------------------------------------------- IA (Gemini)
+let modeloBom = "";
+async function chamaModelo(modelo: string, prompt: string, json = true) {
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: json ? { temperature: 0.6, responseMimeType: "application/json" } : { temperature: 0.6 },
+    }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`${modelo}: ${j?.error?.message || r.status}`);
+  const txt = j?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
+  const limpo = txt.replace(/^[\s\S]*?(\{)/, "$1").replace(/\}[^}]*$/, "}");
+  try { return { modelo, ...JSON.parse(limpo) }; }
+  catch { throw new Error(`${modelo}: resposta fora do formato`); }
+}
+
+// pergunta ao Google quais modelos "flash" esta chave pode usar (mais novos primeiro)
+async function modelosDisponiveis() {
+  try {
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": GEMINI_KEY } });
+    const j = await r.json();
+    const ver = (n: string) => Number((n.match(/(\d+(?:\.\d+)?)/) || [0, 0])[1]);
+    return (j.models || [])
+      .filter((m: any) => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map((m: any) => String(m.name).replace(/^models\//, ""))
+      .filter((n: string) => /flash/i.test(n) && !/(image|tts|audio|live|embedding|vision|exp|preview|8b)/i.test(n))
+      .sort((a: string, b: string) => ver(b) - ver(a) || (/lite/.test(a) ? 1 : 0) - (/lite/.test(b) ? 1 : 0));
+  } catch { return []; }
+}
+
 async function gemini(prompt: string) {
   if (!GEMINI_KEY) return { erro: "GEMINI_API_KEY não configurada" };
-  let ultimoErro = "";
-  for (const modelo of MODELOS) {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.6, responseMimeType: "application/json" },
-      }),
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) { ultimoErro = `${modelo}: ${j?.error?.message || r.status}`; continue; }
-    const txt = j?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("") || "";
-    try { return { modelo, ...JSON.parse(txt.replace(/^```json|```$/g, "").trim()) }; }
-    catch { ultimoErro = `${modelo}: resposta fora do formato`; }
-  }
-  return { erro: ultimoErro };
+  const erros: string[] = [];
+  const tentados = new Set<string>();
+  const tenta = async (lista: string[]) => {
+    for (const m of lista) {
+      if (!m || tentados.has(m)) continue;
+      tentados.add(m);
+      for (const json of [true, false]) {
+        try { const r = await chamaModelo(m, prompt, json); modeloBom = m; return r; }
+        catch (e) { erros.push(e instanceof Error ? e.message : String(e)); if (!/formato/.test(String(e))) break; }
+      }
+    }
+    return null;
+  };
+  const r1 = await tenta([modeloBom, ...MODELOS]);
+  if (r1) return r1;
+  const r2 = await tenta((await modelosDisponiveis()).slice(0, 4));
+  if (r2) return r2;
+  return { erro: erros.slice(-3).join(" | ") || "nenhum modelo disponível para esta chave" };
 }
 
 function montaPrompt(loja: any, c: any, site: any, mudancas: string[]) {
@@ -215,8 +248,9 @@ Deno.serve(async (req) => {
     const { data: c } = await db.from("concorrentes").select("*").eq("id", body.concorrente_id).eq("user_id", u.user.id).maybeSingle();
     if (!c) return resp({ erro: "Concorrente não encontrada." }, 404);
     const ult = Date.parse(c.ultima_verificacao);
-    const { count } = await db.from("verificacoes").select("id", { count: "exact", head: true }).eq("concorrente_id", c.id);
-    if (count && Date.now() - ult < 10 * 60 * 1000) return resp({ erro: "Essa concorrente foi verificada há poucos minutos. Tente de novo daqui a pouco." }, 429);
+    const { data: ultV } = await db.from("verificacoes").select("dados").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle();
+    const iaFalhou = !ultV || !ultV.dados?.ia || ultV.dados.ia.erro;
+    if (!iaFalhou && Date.now() - ult < 10 * 60 * 1000) return resp({ erro: "Essa concorrente foi verificada há poucos minutos. Tente de novo daqui a pouco." }, 429);
     return resp(await verificar(c));
   } catch (e) {
     return resp({ erro: e instanceof Error ? e.message : String(e) }, 500);
