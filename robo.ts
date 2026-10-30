@@ -1,5 +1,5 @@
 // =====================================================================
-// Radar · robô "verificar" (versão 4)
+// Radar · robô "verificar" (versão 5: + perfil, calendário, legendas, campanhas, tendências)
 // - Site: lê produtos com foto, preço, preço antigo e desconto (JSON-LD,
 //   Shopify e cartões de produto), promoções e frete. Corrige acentos.
 // - Instagram (opcional): seguidores, posts com foto, curtidas, comentários,
@@ -221,12 +221,12 @@ function compara(antes: any, agora: any) {
 }
 
 // ------------------------------------------------------------ Instagram
-async function lerInstagram(usuario: string) {
+async function lerInstagram(usuario: string, limite = 24) {
   const u = (usuario || "").replace(/^@/, "").replace(/.*instagram\.com\//i, "").replace(/[/?#].*$/, "").trim();
   if (!u) return { ok: false, erro: "sem @" };
   if (!IG_TOKEN || !IG_USER_ID) return { ok: false, erro: "instagram_nao_conectado", usuario: u };
   const campos = `business_discovery.username(${u}){username,name,biography,website,profile_picture_url,followers_count,follows_count,media_count,` +
-    `media.limit(24){caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count}}`;
+    `media.limit(${limite}){caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count}}`;
   try {
     const r = await fetch(`${GRAPH}/${IG_USER_ID}?fields=${encodeURIComponent(campos)}&access_token=${IG_TOKEN}`);
     const j = await r.json();
@@ -238,7 +238,7 @@ async function lerInstagram(usuario: string) {
     const posts = (b.media?.data || []).map((p: any) => ({
       tipo: p.media_product_type === "REELS" ? "Reels" : p.media_type === "CAROUSEL_ALBUM" ? "Carrossel" : p.media_type === "VIDEO" ? "Vídeo" : "Foto",
       foto: p.media_type === "VIDEO" ? (p.thumbnail_url || "") : (p.media_url || p.thumbnail_url || ""),
-      legenda: corta((p.caption || "").replace(/\s+/g, " "), 220), link: p.permalink, data: p.timestamp,
+      legenda: corta((p.caption || "").replace(/\s+/g, " "), 600), link: p.permalink, data: p.timestamp,
       curtidas: typeof p.like_count === "number" ? p.like_count : null, comentarios: p.comments_count ?? 0,
     }));
     const seg = b.followers_count || 0;
@@ -256,11 +256,35 @@ async function lerInstagram(usuario: string) {
       ok: true, usuario: b.username, nome: b.name, bio: b.biography || "", site: b.website || "", foto: b.profile_picture_url || "",
       seguidores: seg, seguindo: b.follows_count || 0, total_posts: b.media_count || 0,
       posts_semana: datas.length ? +(datas.length / semanas).toFixed(1) : 0, ultimo_post_dias, engajamento: seg ? +((media / seg) * 100).toFixed(2) : 0,
-      interacoes_media: Math.round(media), tipos, posts,
+      interacoes_media: Math.round(media), tipos, ritmo: ritmo(posts), posts,
     };
   } catch (e) {
     return { ok: false, usuario: u, erro: e instanceof Error ? e.message : String(e) };
   }
+}
+
+// melhores dias e horários (horário de Brasília) por média de interações
+const DIAS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+function ritmo(posts: any[]) {
+  const dias = DIAS.map((d) => ({ dia: d, posts: 0, inter: 0 }));
+  const faixas: Record<string, { posts: number; inter: number }> = { "Manhã (6h–12h)": { posts: 0, inter: 0 }, "Tarde (12h–18h)": { posts: 0, inter: 0 }, "Noite (18h–24h)": { posts: 0, inter: 0 }, "Madrugada (0h–6h)": { posts: 0, inter: 0 } };
+  const formatos: Record<string, { posts: number; inter: number }> = {};
+  for (const p of posts) {
+    const t = Date.parse(p.data); if (!t) continue;
+    const br = new Date(t - 3 * 3600e3);
+    const i = (p.curtidas || 0) + (p.comentarios || 0);
+    const d = dias[br.getUTCDay()]; d.posts++; d.inter += i;
+    const h = br.getUTCHours();
+    const f = h < 6 ? "Madrugada (0h–6h)" : h < 12 ? "Manhã (6h–12h)" : h < 18 ? "Tarde (12h–18h)" : "Noite (18h–24h)";
+    faixas[f].posts++; faixas[f].inter += i;
+    formatos[p.tipo] = formatos[p.tipo] || { posts: 0, inter: 0 }; formatos[p.tipo].posts++; formatos[p.tipo].inter += i;
+  }
+  const med = (o: any) => (o.posts ? Math.round(o.inter / o.posts) : 0);
+  return {
+    dias: dias.map((d) => ({ dia: d.dia, posts: d.posts, media: med(d) })),
+    faixas: Object.entries(faixas).map(([k, v]) => ({ faixa: k, posts: v.posts, media: med(v) })),
+    formatos: Object.entries(formatos).map(([k, v]) => ({ formato: k, posts: v.posts, media: med(v) })).sort((a, b) => b.media - a.media),
+  };
 }
 
 const bibliotecaAnuncios = (c: any) =>
@@ -377,10 +401,172 @@ async function verificar(c: any) {
   const agora = new Date().toISOString();
   await db.from("verificacoes").insert({ concorrente_id: c.id, user_id: c.user_id, feita_em: agora, dados });
   await db.from("concorrentes").update({ ultima_verificacao: agora }).eq("id", c.id);
-  const { data: velhas } = await db.from("verificacoes").select("id").eq("concorrente_id", c.id)
-    .order("feita_em", { ascending: false }).range(40, 200);
-  if (velhas?.length) await db.from("verificacoes").delete().in("id", velhas.map((v: any) => v.id));
+  // histórico: guarda as 40 últimas + 1 leitura por dia por até 120 dias (para relatórios e gráficos)
+  const { data: velhas } = await db.from("verificacoes").select("id,feita_em").eq("concorrente_id", c.id)
+    .order("feita_em", { ascending: false }).range(40, 2000);
+  if (velhas?.length) {
+    const dias = new Set<string>(), apagar: string[] = [];
+    const limite = Date.now() - 120 * 86400e3;
+    for (const v of velhas) {
+      const dia = String(v.feita_em).slice(0, 10);
+      if (Date.parse(v.feita_em) < limite || dias.has(dia)) apagar.push(v.id); else dias.add(dia);
+    }
+    for (let i = 0; i < apagar.length; i += 100) await db.from("verificacoes").delete().in("id", apagar.slice(i, i + 100));
+  }
+  // inspirações: posts que tiveram 2x ou mais a média de interações
+  if (ig.ok) {
+    const virais = ig.posts.filter((p: any) => (p.vezes_media || 0) >= 2 && p.link);
+    if (virais.length) await db.from("analises").upsert(virais.map((p: any) => ({
+      user_id: c.user_id, tipo: "swipe", chave: p.link,
+      dados: { ...p, concorrente: c.nome, concorrente_id: c.id, usuario: ig.usuario, seguidores: ig.seguidores },
+    })), { onConflict: "user_id,tipo,chave" });
+  }
   return { id: c.id, nome: c.nome, site_ok: site.ok, ig_ok: ig.ok, ia_ok: !(ia as any).erro, feita_em: agora, dados };
+}
+
+
+// ------------------------------------------------------------ planejamento (etapa 5)
+const hoje = () => new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+async function contexto(uid: string) {
+  const { data: loja } = await db.from("empresas").select("*").eq("user_id", uid).maybeSingle();
+  const { data: cs } = await db.from("concorrentes").select("id,nome,instagram,cidade").eq("user_id", uid);
+  const conc: any[] = [];
+  for (const c of cs || []) {
+    const { data: v } = await db.from("verificacoes").select("dados,feita_em").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle();
+    const ig = v?.dados?.instagram, site = v?.dados?.site;
+    conc.push({
+      nome: c.nome, instagram: c.instagram,
+      seguidores: ig?.ok ? ig.seguidores : null, engajamento: ig?.ok ? ig.engajamento : null, posts_semana: ig?.ok ? ig.posts_semana : null,
+      ritmo: ig?.ok ? (ig.ritmo || ritmo(ig.posts || [])) : null,
+      top_posts: ig?.ok ? [...(ig.posts || [])].sort((a: any, b: any) => (b.vezes_media || 0) - (a.vezes_media || 0)).slice(0, 4)
+        .map((p: any) => ({ tipo: p.tipo, legenda: corta(p.legenda || "", 220), vezes_media: p.vezes_media, data: p.data?.slice(0, 10) })) : [],
+      posts_recentes: ig?.ok ? (ig.posts || []).slice(0, 24).map((p: any) => ({ data: p.data?.slice(0, 10), legenda: corta(p.legenda || "", 120) })) : [],
+      promocoes: site?.ok ? site.promocoes : [], preco_tipico: site?.ok ? site.faixa_precos?.mediana : null,
+      resumo_ia: v?.dados?.ia?.resumo || null,
+    });
+  }
+  const meu = loja?.instagram ? await lerInstagram(loja.instagram, 36) : { ok: false } as any;
+  return { loja, conc, meu };
+}
+const lojaTxt = (l: any) => `${l?.nome_fantasia || "-"} | segmento ${l?.segmento || "-"} | ${l?.cidade || "-"} | Instagram ${l?.instagram || "-"} | sobre: ${l?.descricao || "-"}`;
+const meuTxt = (m: any) => m?.ok ? JSON.stringify({ seguidores: m.seguidores, posts_semana: m.posts_semana, engajamento_pct: m.engajamento, ultimo_post_dias: m.ultimo_post_dias,
+  ritmo: m.ritmo, bio: m.bio, posts: m.posts.slice(0, 20).map((p: any) => ({ tipo: p.tipo, legenda: corta(p.legenda || "", 160), curtidas: p.curtidas, comentarios: p.comentarios, vezes_media: p.vezes_media, data: p.data?.slice(0, 10) })) })
+  : "Instagram da loja não disponível (conta pessoal ou não informada).";
+const salva = (uid: string, tipo: string, chave: string, dados: any) =>
+  db.from("analises").upsert({ user_id: uid, tipo, chave, dados, criado_em: new Date().toISOString() }, { onConflict: "user_id,tipo,chave" });
+
+async function analisarPerfil(uid: string) {
+  const { loja, conc, meu } = await contexto(uid);
+  if (!meu.ok) return { erro: meu.erro === "instagram_nao_conectado" ? "O Instagram ainda não foi conectado ao Radar." : "Não conseguimos ler o Instagram da sua loja. Ele precisa ser uma conta Comercial ou de Criador. Confira o @ em Minha loja." };
+  const ia = await gemini(`Você é um estrategista de Instagram para lojas de moda no Brasil. Português do Brasil, direto e prático.
+MINHA LOJA: ${lojaTxt(loja)}
+MEU INSTAGRAM (dados reais): ${meuTxt(meu)}
+CONCORRENTES (dados reais): ${JSON.stringify(conc.map((c) => ({ nome: c.nome, seguidores: c.seguidores, engajamento: c.engajamento, posts_semana: c.posts_semana, top_posts: c.top_posts })))}
+Use só esses dados. Não invente números.
+Responda APENAS com este JSON:
+{"nota": 0-10, "diagnostico": "2 frases", "fortes": ["3 pontos fortes"], "fracos": ["3 pontos a melhorar"],
+ "acoes": [{"titulo": "ação", "texto": "como fazer em 1-2 frases"}], "frequencia_ideal": "ex.: 4 posts e 10 stories por semana",
+ "melhor_dia_horario": "frase usando o ritmo real", "bio_sugerida": "bio de até 150 caracteres", "comparacao": "1 frase comparando com as concorrentes"}
+"acoes": 5 ações.`);
+  const dados = { ...ia, meu: { ...meu, posts: meu.posts.slice(0, 36) }, gerado_em: new Date().toISOString() };
+  await salva(uid, "perfil", "atual", dados);
+  return dados;
+}
+
+async function gerarCalendario(uid: string, datas: any[]) {
+  const { loja, conc, meu } = await contexto(uid);
+  const nicho: Record<string, { posts: number; soma: number }> = {};
+  conc.forEach((c) => (c.ritmo?.dias || []).forEach((d: any) => { nicho[d.dia] = nicho[d.dia] || { posts: 0, soma: 0 }; nicho[d.dia].posts += d.posts; nicho[d.dia].soma += d.media * d.posts; }));
+  const diasNicho = Object.entries(nicho).map(([dia, v]) => ({ dia, posts: v.posts, media: v.posts ? Math.round(v.soma / v.posts) : 0 }));
+  const ia = await gemini(`Você é social media de lojas de moda no Brasil. Monte o calendário de postagens da PRÓXIMA SEMANA (segunda a sábado) para a minha loja.
+MINHA LOJA: ${lojaTxt(loja)}
+MEU INSTAGRAM: ${meuTxt(meu)}
+DIAS QUE MAIS ENGAJAM NO NICHO (concorrentes, dados reais): ${JSON.stringify(diasNicho)}
+O QUE DEU CERTO NAS CONCORRENTES: ${JSON.stringify(conc.map((c) => ({ nome: c.nome, top_posts: c.top_posts, promocoes: c.promocoes })))}
+DATAS COMERCIAIS PRÓXIMAS: ${JSON.stringify(datas || [])}
+Hoje é ${hoje()}. Use os dados reais para escolher dia, horário e formato.
+Responda APENAS com este JSON:
+{"semana": [{"dia": "Segunda", "horario": "19:00", "formato": "Reels|Carrossel|Stories|Post", "tema": "título curto", "ideia": "o que mostrar, 1-2 frases", "legenda": "legenda pronta curta com CTA", "porque": "baseado em qual dado"}],
+ "stories_diarios": "sugestão de rotina de stories", "observacao": "1 frase sobre a estratégia da semana"}
+"semana": exatamente 6 itens, de Segunda a Sábado.`);
+  const dados = { ...ia, nicho: diasNicho, meu_ritmo: meu.ok ? meu.ritmo : null, gerado_em: new Date().toISOString() };
+  await salva(uid, "calendario", "atual", dados);
+  return dados;
+}
+
+async function reescreverLegenda(uid: string, legenda: string, concorrente: string, tipo: string) {
+  const { data: loja } = await db.from("empresas").select("*").eq("user_id", uid).maybeSingle();
+  return await gemini(`Você é copywriter de Instagram para lojas de moda no Brasil.
+Esta legenda de ${concorrente || "uma concorrente"} (post em ${tipo || "formato não informado"}) teve muito mais engajamento que a média dela:
+"""${String(legenda || "").slice(0, 1500)}"""
+MINHA LOJA: ${lojaTxt(loja)}
+Tarefa: explique o gancho que funcionou e escreva 2 legendas ORIGINAIS para a minha loja usando a mesma estratégia, sem copiar frases, no tom da minha marca.
+Responda APENAS com este JSON:
+{"gancho": "qual gancho/estrutura fez sucesso", "por_que_funcionou": "1-2 frases",
+ "versoes": [{"titulo": "nome da abordagem", "legenda": "legenda completa com emojis moderados e CTA", "formato": "Reels|Carrossel|Post|Stories", "ideia_visual": "o que mostrar"}],
+ "hashtags": ["5 a 8 hashtags relevantes"]}`);
+}
+
+async function gerarCampanha(uid: string, data: any) {
+  const { loja, conc } = await contexto(uid);
+  const ia = await gemini(`Você é estrategista de varejo de moda no Brasil. Monte uma campanha para a data comercial abaixo.
+DATA: ${data?.nome} em ${data?.data} (faltam ${data?.faltam} dias). Hoje é ${hoje()}.
+MINHA LOJA: ${lojaTxt(loja)}
+CONCORRENTES (dados reais: posts recentes, o que mais engajou, promoções no site): ${JSON.stringify(conc.map((c) => ({ nome: c.nome, top_posts: c.top_posts, posts_recentes: c.posts_recentes.slice(0, 12), promocoes: c.promocoes, preco_tipico: c.preco_tipico })))}
+Se algum post das concorrentes falar desta data, use como referência do que elas costumam fazer. Não invente dados das concorrentes.
+Responda APENAS com este JSON:
+{"nome_campanha": "nome criativo", "conceito": "2 frases", "o_que_concorrentes_fazem": "o que os dados mostram (ou 'sem dados desta data')",
+ "cronograma": [{"quando": "ex.: 15 dias antes", "acao": "o que fazer", "formato": "Reels|Carrossel|Stories|Post|Anúncio|WhatsApp"}],
+ "ofertas": ["3 ideias de oferta que protegem a margem"], "criativos": [{"formato": "Reels|Carrossel|Stories", "ideia": "o que gravar/criar"}],
+ "legenda_principal": "legenda pronta", "anuncio": {"publico": "sugestão de público", "verba_sugerida": "faixa em R$ por dia", "texto": "texto do anúncio"}}
+"cronograma": 5 a 7 passos. "criativos": 4 ideias.`);
+  const dados = { ...ia, data, gerado_em: new Date().toISOString() };
+  await salva(uid, "campanha", String(data?.id || data?.data || "data"), dados);
+  return dados;
+}
+
+// tendências: hashtags no Instagram (recurso "Instagram Public Content Access" da Meta)
+async function lerTermo(t: any) {
+  const tag = String(t.termo || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9_]/g, "");
+  if (!tag) return { erro: "termo inválido" };
+  if (!IG_TOKEN || !IG_USER_ID) return { erro: "instagram_nao_conectado" };
+  let id = t.hashtag_id;
+  if (!id) {
+    const r = await fetch(`${GRAPH}/ig_hashtag_search?user_id=${IG_USER_ID}&q=${encodeURIComponent(tag)}&access_token=${IG_TOKEN}`);
+    const j = await r.json();
+    if (!r.ok) return { erro: j?.error?.message || "erro na busca", tag };
+    id = j?.data?.[0]?.id;
+    if (!id) return { erro: "hashtag não encontrada", tag };
+  }
+  const campos = "id,caption,media_type,like_count,comments_count,timestamp,permalink";
+  const r2 = await fetch(`${GRAPH}/${id}/recent_media?user_id=${IG_USER_ID}&fields=${campos}&limit=50&access_token=${IG_TOKEN}`);
+  const j2 = await r2.json();
+  if (!r2.ok) return { erro: j2?.error?.message || "erro ao ler posts", tag, hashtag_id: id };
+  const posts = j2.data || [];
+  const r3 = await fetch(`${GRAPH}/${id}/top_media?user_id=${IG_USER_ID}&fields=${campos}&limit=6&access_token=${IG_TOKEN}`);
+  const j3 = r3.ok ? await r3.json() : { data: [] };
+  const inter = posts.map((p: any) => (p.like_count || 0) + (p.comments_count || 0));
+  return {
+    tag, hashtag_id: id,
+    leitura: { em: new Date().toISOString(), posts_24h: posts.length, media_interacoes: inter.length ? Math.round(inter.reduce((a: number, b: number) => a + b, 0) / inter.length) : 0 },
+    top: (j3.data || []).slice(0, 6).map((p: any) => ({ legenda: corta((p.caption || "").replace(/\s+/g, " "), 160), link: p.permalink, curtidas: p.like_count ?? null, comentarios: p.comments_count ?? 0, data: p.timestamp })),
+  };
+}
+async function atualizarTermo(t: any) {
+  const r: any = await lerTermo(t);
+  const hist = Array.isArray(t.historico) ? t.historico : [];
+  if (r.leitura) {
+    const ant = hist.slice(-8).map((h: any) => h.posts_24h).filter((n: any) => typeof n === "number");
+    const base = ant.length ? ant.reduce((a: number, b: number) => a + b, 0) / ant.length : 0;
+    r.leitura.alta = base > 0 && r.leitura.posts_24h >= base * 1.6 && r.leitura.posts_24h >= 10;
+    r.leitura.variacao = base ? Math.round((r.leitura.posts_24h / base - 1) * 100) : null;
+    r.leitura.top = r.top;
+    hist.push(r.leitura);
+  } else {
+    hist.push({ em: new Date().toISOString(), erro: r.erro });
+  }
+  await db.from("termos").update({ hashtag_id: r.hashtag_id || t.hashtag_id || null, historico: hist.slice(-60), ultima_leitura: new Date().toISOString() }).eq("id", t.id);
+  return { ...r, historico: hist.slice(-60) };
 }
 
 Deno.serve(async (req: Request) => {
@@ -398,7 +584,11 @@ Deno.serve(async (req: Request) => {
         catch (e) { feitos.push({ nome: c.nome, erro: String(e) }); }
         await new Promise((ok) => setTimeout(ok, 1500));
       }
-      return resp({ verificados: feitos.length, feitos });
+      const limiteT = new Date(Date.now() - SEIS_HORAS + 5 * 60 * 1000).toISOString();
+      const { data: ts } = await db.from("termos").select("*").lte("ultima_leitura", limiteT).order("ultima_leitura", { ascending: true }).limit(5);
+      let termos = 0;
+      for (const t of ts || []) { try { await atualizarTermo(t); termos++; } catch { /* segue */ } }
+      return resp({ verificados: feitos.length, feitos, termos });
     }
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
     const { data: u } = await db.auth.getUser(token);
@@ -407,6 +597,16 @@ Deno.serve(async (req: Request) => {
       // apaga o login; perfis, empresas, concorrentes e verificações saem junto (on delete cascade)
       const { error } = await db.auth.admin.deleteUser(u.user.id);
       return error ? resp({ erro: error.message }, 500) : resp({ ok: true });
+    }
+    const uid = u.user.id;
+    if (body.acao === "perfil") return resp(await analisarPerfil(uid));
+    if (body.acao === "calendario") return resp(await gerarCalendario(uid, body.datas || []));
+    if (body.acao === "reescrever") return resp(await reescreverLegenda(uid, body.legenda, body.concorrente, body.tipo));
+    if (body.acao === "campanha") return resp(await gerarCampanha(uid, body.data));
+    if (body.acao === "termo") {
+      const { data: t } = await db.from("termos").select("*").eq("id", body.termo_id).eq("user_id", uid).maybeSingle();
+      if (!t) return resp({ erro: "Termo não encontrado." }, 404);
+      return resp(await atualizarTermo(t));
     }
     if (!body.concorrente_id) return resp({ erro: "concorrente_id faltando" }, 400);
     const { data: c } = await db.from("concorrentes").select("*").eq("id", body.concorrente_id).eq("user_id", u.user.id).maybeSingle();
