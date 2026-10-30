@@ -55,8 +55,8 @@ async function lerSite(site: string) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; RadarBot/1.0; +https://klayton-wj.github.io/radar/)",
-        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.9",
       },
     });
@@ -207,7 +207,9 @@ async function verificar(c: any) {
   const site = c.site ? await lerSite(c.site) : { ok: false, erro: "sem site cadastrado" };
   const mudancas = compara(ant?.dados?.site, site);
   const mesmaCoisa = site.ok && ant?.dados?.site?.assinatura === (site as any).assinatura && ant?.dados?.ia && !ant.dados.ia.erro;
-  const ia = mesmaCoisa ? { ...ant!.dados.ia, reaproveitado: true } : await gemini(montaPrompt(loja, c, site, mudancas));
+  const ia = !site.ok
+    ? { erro: "site", detalhe: (site as any).erro || ("código " + (site as any).status) }
+    : mesmaCoisa ? { ...ant!.dados.ia, reaproveitado: true } : await gemini(montaPrompt(loja, c, site, mudancas));
   const { amostra: _a, ...siteSalvo } = site as any;
   const dados = { site: siteSalvo, mudancas, ia };
   const agora = new Date().toISOString();
