@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<meta name="robots" content="noindex">
+<title>Aprovação de posts</title>
+<style>
+:root{--ink:#15151f;--muted:#6b6b7b;--line:#ececf3;--bg:#f7f7fa;--ok:#16a34a;--bad:#dc2626;--ig:linear-gradient(135deg,#fa7e1e,#d62976 45%,#962fbf 75%,#4f5bd5)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",Roboto,system-ui,-apple-system,Arial,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:20px 16px 60px}
+.bar{height:6px;background:var(--ig)}
+header{display:flex;align-items:center;gap:12px;margin:8px 0 18px}
+header img{width:52px;height:52px;object-fit:contain;border-radius:12px;background:#fff;border:1px solid var(--line)}
+.logo{width:44px;height:44px;border-radius:12px;background:var(--ig)}
+h1{font-size:24px;margin:0;line-height:1.2}
+.sm{font-size:13px;color:var(--muted)}
+.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:16px;display:grid;gap:10px;margin-bottom:14px;box-shadow:0 4px 18px rgba(20,20,40,.04)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip{font-size:12px;font-weight:800;padding:4px 10px;border-radius:999px;background:#f3e8ff;color:#6b21a8}
+.st{font-size:12px;font-weight:800;padding:4px 10px;border-radius:999px;margin-left:auto}
+.st.pendente{background:#f4f4f7;color:var(--muted)}.st.aprovado{background:#dcfce7;color:#166534}.st.ajuste{background:#fee2e2;color:#991b1b}
+.leg{background:#f6f6fa;border-radius:12px;padding:10px 12px;white-space:pre-wrap;font-size:14px}
+button{font:inherit;font-weight:800;border-radius:12px;padding:11px 16px;border:0;cursor:pointer}
+.ok{background:var(--ok);color:#fff}.aj{background:#fff;color:var(--bad);border:1.5px solid #fecaca}
+textarea{width:100%;font:inherit;border:1px solid var(--line);border-radius:12px;padding:10px;min-height:70px}
+.res{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}.res div{background:#fff;border:1px solid var(--line);border-radius:14px;padding:10px;text-align:center}.res b{display:block;font-size:22px}
+.msg{padding:40px 16px;text-align:center}
+[hidden]{display:none!important}
+button:focus-visible,textarea:focus-visible{outline:3px solid #962fbf;outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="bar"></div>
+<main class="wrap" id="app"><p class="msg">Carregando…</p></main>
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script>
+(function(){
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const token=new URLSearchParams(location.search).get('t');
+const CFG=window.RADAR_CONFIG||{};
+if(!token||!window.supabase||!CFG.supabaseUrl){$('#app').innerHTML='<p class="msg">Link inválido.</p>';return}
+const sb=window.supabase.createClient(CFG.supabaseUrl,CFG.supabaseAnonKey,{auth:{persistSession:false}});
+let D=null;
+function render(){
+  const it=D.itens||[],ap=it.filter(x=>x.status==='aprovado').length,aj=it.filter(x=>x.status==='ajuste').length;
+  $('#app').innerHTML='<header>'+(D.logo?'<img src="'+D.logo+'" alt="">':'<span class="logo" aria-hidden="true"></span>')+'<div><h1>'+esc(D.titulo)+'</h1><span class="sm">'+(D.marca?esc(D.marca)+' · ':'')+'para '+esc(D.loja||'')+'</span></div></header>'+
+  '<div class="res"><div><b>'+ap+'</b><span class="sm">aprovados</span></div><div><b>'+aj+'</b><span class="sm">com ajuste</span></div><div><b>'+(it.length-ap-aj)+'</b><span class="sm">pendentes</span></div></div>'+
+  '<p class="sm" style="margin:0 0 12px">Aprove cada post ou peça um ajuste. Suas respostas chegam na hora para quem enviou.</p>'+
+  it.map((x,i)=>'<section class="card" aria-label="'+esc(x.dia)+'"><div class="row"><b style="font-size:17px">'+esc(x.dia||'')+'</b>'+(x.horario?'<span class="sm">🕖 '+esc(x.horario)+'</span>':'')+(x.formato?'<span class="chip">'+esc(x.formato)+'</span>':'')+'<span class="st '+(x.status||'pendente')+'">'+({aprovado:'Aprovado',ajuste:'Ajuste pedido'}[x.status]||'Pendente')+'</span></div>'+
+   (x.tema?'<b>'+esc(x.tema)+'</b>':'')+(x.ideia?'<span class="sm" style="color:var(--ink)">'+esc(x.ideia)+'</span>':'')+(x.legenda?'<div class="leg">'+esc(x.legenda)+'</div>':'')+
+   (x.status==='ajuste'&&x.comentario?'<span class="sm">✏️ Seu pedido: '+esc(x.comentario)+'</span>':'')+
+   '<div class="row"><button class="ok" data-i="'+i+'" data-s="aprovado">✓ Aprovar</button><button class="aj" data-i="'+i+'" data-a="1">Pedir ajuste</button></div>'+
+   '<div id="aj'+i+'" hidden style="display:grid;gap:8px"><label class="sm" for="t'+i+'">O que precisa mudar?</label><textarea id="t'+i+'" maxlength="1000">'+esc(x.comentario||'')+'</textarea><button class="aj" data-i="'+i+'" data-s="ajuste">Enviar ajuste</button></div></section>').join('')+
+  '<p class="sm" style="text-align:center;margin-top:20px">Feito com Radar</p>';
+}
+async function carrega(){
+  const r=await sb.rpc('aprovacao_ver',{t:token});
+  if(r.error||!r.data){$('#app').innerHTML='<p class="msg">Este link expirou ou não existe.</p>';return}
+  D=r.data;render();
+}
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('button');if(!b)return;const i=+b.dataset.i;
+  if(b.dataset.a){const box=$('#aj'+i);box.hidden=!box.hidden;if(!box.hidden)$('#t'+i).focus();return}
+  if(!b.dataset.s)return;
+  const com=b.dataset.s==='ajuste'?$('#t'+i).value.trim():'';
+  if(b.dataset.s==='ajuste'&&!com){$('#t'+i).focus();return}
+  b.disabled=true;b.textContent='Enviando…';
+  const r=await sb.rpc('aprovacao_responder',{t:token,idx:i,situacao:b.dataset.s,comentario:com});
+  if(r.error){b.disabled=false;b.textContent='Tentar de novo';alert('Não foi possível enviar: '+r.error.message);return}
+  D.itens=r.data;render();
+});
+carrega();
+})();
+</script>
+</body>
+</html>
