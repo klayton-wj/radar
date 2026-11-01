@@ -399,7 +399,7 @@ if (ia.erro) return ia;
 return { pagina: ia.pagina || ia };
 }
 
-const CF_CONTA = env("CF_ACCOUNT_ID"), CF_TOKEN = env("CF_API_TOKEN"), CF_MODELO = env("CF_IMAGE_MODEL") || "@cf/black-forest-labs/flux-1-schnell";
+const CF_CONTA = String(env("CF_ACCOUNT_ID") || "").trim(), CF_TOKEN = String(env("CF_API_TOKEN") || "").trim(), CF_MODELO = env("CF_IMAGE_MODEL") || "@cf/black-forest-labs/flux-1-schnell";
 async function imagemIA(emp: any, b: any) {
 if (!CF_CONTA || !CF_TOKEN) return { erro: "A criação de imagens por IA ainda não foi ativada no Radar." };
 const p = await planoDe(emp.user_id);
