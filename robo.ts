@@ -324,7 +324,7 @@ async function lerInstagram(usuario: string, limite = 24) {
   const campos = `business_discovery.username(${u}){username,name,biography,website,profile_picture_url,followers_count,follows_count,media_count,` +
     `media.limit(${limite}){caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count}}`;
   try {
-    const r = await fetch(`${GRAPH}/${IG_USER_ID}?fields=${encodeURIComponent(campos)}&access_token=${IG_TOKEN}`);
+    const r = await fetch(`${GRAPH}/${IG_USER_ID}?fields=${encodeURIComponent(campos)}&access_token=${IG_TOKEN}`, { signal: AbortSignal.timeout(15000) });
     const j = await r.json();
     if (!r.ok || !j.business_discovery) {
       const msg = j?.error?.message || "não encontrado";
@@ -389,14 +389,24 @@ const bibliotecaAnuncios = (c: any) =>
 
 // ------------------------------------------------------------ IA (Gemini)
 let modeloBom = "";
-async function chamaModelo(modelo: string, prompt: string, json = true) {
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
-    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: json ? { temperature: 0.6, responseMimeType: "application/json" } : { temperature: 0.6 } }),
-  });
+const semPensar: Record<string, boolean> = {}; // modelos que não aceitam o ajuste de "pensamento"
+async function chamaModelo(modelo: string, prompt: string, json = true, ms = 30000) {
+  const cfg: any = json ? { temperature: 0.6, responseMimeType: "application/json" } : { temperature: 0.6 };
+  if (!semPensar[modelo]) cfg.thinkingConfig = { thinkingBudget: 0 };
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), Math.max(4000, ms));
+  let r: Response;
+  try {
+    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
+      method: "POST", signal: ctl.signal,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: cfg }),
+    });
+  } catch (e) {
+    throw new Error(`${modelo}: ${ctl.signal.aborted ? "tempo esgotado" : (e instanceof Error ? e.message : String(e))}`);
+  } finally { clearTimeout(t); }
   const j = await r.json().catch(() => ({}));
+  if (!r.ok && cfg.thinkingConfig && /thinking/i.test(j?.error?.message || "")) { semPensar[modelo] = true; return chamaModelo(modelo, prompt, json, ms); }
   if (!r.ok) throw new Error(`${modelo}: ${j?.error?.message || r.status}`);
   const txt = j?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
   const limpo = txt.replace(/^[\s\S]*?(\{)/, "$1").replace(/\}[^}]*$/, "}");
@@ -404,7 +414,7 @@ async function chamaModelo(modelo: string, prompt: string, json = true) {
 }
 async function modelosDisponiveis() {
   try {
-    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": GEMINI_KEY } });
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": GEMINI_KEY }, signal: AbortSignal.timeout(8000) });
     const j = await r.json();
     const ver = (n: string) => Number((n.match(/(\d+(?:\.\d+)?)/) || [0, 0])[1]);
     return (j.models || []).filter((m: any) => (m.supportedGenerationMethods || []).includes("generateContent"))
@@ -423,17 +433,20 @@ async function gemini(prompt: string, leve = false) {
   const base = [env("GEMINI_MODEL"), modeloBom, ...MODELOS.slice(1)].filter(Boolean);
   // rotina automática usa primeiro os modelos "lite" (cota grátis bem maior); pedidos do usuário usam primeiro os completos
   const ordem = [...new Set(leve ? [...lites, ...base, ...cheios] : [...base, ...cheios, ...lites])]
-    .filter((m) => !(esgotado[m] > Date.now())).slice(0, 7);
+    .filter((m) => !(esgotado[m] > Date.now())).slice(0, 4);
   const erros: string[] = [];
   let soCota = true;
+  const prazo = Date.now() + (leve ? 45000 : 70000); // nunca passar do limite da Edge Function
   for (const m of ordem) {
     for (const json of [true, false]) {
-      try { const r = await chamaModelo(m, prompt, json); if (!/lite/i.test(m)) modeloBom = m; return r; }
+      const resta = prazo - Date.now();
+      if (resta < 6000) { soCota = false; erros.push("tempo total esgotado"); break; }
+      try { const r = await chamaModelo(m, prompt, json, Math.min(35000, resta)); if (!/lite/i.test(m)) modeloBom = m; return r; }
       catch (e) {
         const msg = String(e instanceof Error ? e.message : e);
         erros.push(msg);
         if (/quota|exceeded|rate limit|RESOURCE_EXHAUSTED/i.test(msg)) esgotado[m] = Date.now() + 30 * 60e3;
-        else if (/high demand|overloaded|unavailable|503/i.test(msg)) { esgotado[m] = Date.now() + 5 * 60e3; soCota = false; }
+        else if (/high demand|overloaded|unavailable|503|tempo esgotado/i.test(msg)) { esgotado[m] = Date.now() + 3 * 60e3; soCota = false; }
         else soCota = false;
         if (!/formato/.test(msg)) break;
       }
@@ -441,6 +454,7 @@ async function gemini(prompt: string, leve = false) {
   }
   if (!erros.length) return { erro: "Todos os modelos da IA estão no limite agora. Tente de novo em alguns minutos." };
   if (soCota) return { erro: "O limite diário gratuito da IA (Google Gemini) acabou por hoje. Ele volta amanhã — ou ative o faturamento no Google AI Studio para não ter limite." };
+  if (erros.some((e) => /tempo/.test(e))) return { erro: "A IA demorou demais para responder agora. Tente de novo em instantes." };
   return { erro: "A IA está sobrecarregada agora. Tente de novo em alguns minutos. (" + corta(erros.slice(-2).join(" | "), 240) + ")" };
 }
 
@@ -559,10 +573,12 @@ async function verificar(c: any) {
 const hoje = () => new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
 async function contexto(emp: any) {
   const loja = emp;
-  const { data: cs } = await db.from("concorrentes").select("id,nome,instagram,cidade").eq("empresa_id", emp.id);
+  const meuP = loja?.instagram ? lerInstagram(loja.instagram, 36) : Promise.resolve({ ok: false } as any);
+  const { data: cs } = await db.from("concorrentes").select("id,nome,instagram,cidade").eq("empresa_id", emp.id).eq("pausada", false).order("criado_em").limit(12);
+  const ultimas = await Promise.all((cs || []).map((c: any) => db.from("verificacoes").select("dados,feita_em").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle()));
   const conc: any[] = [];
-  for (const c of cs || []) {
-    const { data: v } = await db.from("verificacoes").select("dados,feita_em").eq("concorrente_id", c.id).order("feita_em", { ascending: false }).limit(1).maybeSingle();
+  for (const [k, c] of (cs || []).entries()) {
+    const v = ultimas[k].data;
     const ig = v?.dados?.instagram, site = v?.dados?.site;
     conc.push({
       nome: c.nome, instagram: c.instagram,
@@ -575,7 +591,7 @@ async function contexto(emp: any) {
       resumo_ia: v?.dados?.ia?.resumo || null,
     });
   }
-  const meu = loja?.instagram ? await lerInstagram(loja.instagram, 36) : { ok: false } as any;
+  const meu: any = await meuP;
   return { loja, conc, meu };
 }
 const modoTxt = (m: string) => ({ fisica: "loja física", online: "loja online", ambas: "loja física e online" } as any)[m] || "modalidade não informada";
@@ -780,7 +796,7 @@ async function aprendizados(emp: any) {
 
 async function meusProdutos(emp: any, ler = false) {
   const { data: a } = await db.from("analises").select("dados,criado_em").eq("empresa_id", emp.id).eq("tipo", "meus_produtos").eq("chave", "atual").maybeSingle();
-  if (!ler && a?.dados) return a.dados;
+  if (!ler) return a?.dados || null;
   if (!emp.site) return { erro: "Cadastre o site da sua loja em Minha loja para o Radar ler seus produtos." };
   const s: any = await lerSite(emp.site);
   if (!s.ok) return { erro: "Não conseguimos ler o seu site agora. (" + corta(s.erro || "erro", 120) + ")" };
