@@ -1,3 +1,4 @@
+import { montaCriacao } from "./criar.ts?v=19";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 
 const env = (k: string) => Deno.env.get(k) ?? "";
@@ -366,7 +367,8 @@ encodeURIComponent((c.nome || c.instagram || "").replace(/^@/, ""));
 let modeloBom = "";
 const semPensar: Record<string, boolean> = {};
 let ultimoDiag = 0; // modelos que não aceitam o ajuste de "pensamento"
-async function chamaModelo(modelo: string, prompt: string, json = true, ms = 30000) {
+type Img = { mime: string; b64: string };
+async function chamaModelo(modelo: string, prompt: string, json = true, ms = 30000, imgs: Img[] = []) {
 const cfg: any = json ? { temperature: 0.6, responseMimeType: "application/json" } : { temperature: 0.6 };
 if (!semPensar[modelo]) cfg.thinkingConfig = { thinkingBudget: 0 };
 const ctl = new AbortController();
@@ -376,13 +378,13 @@ try {
 r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
 method: "POST", signal: ctl.signal,
 headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
-body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: cfg }),
+body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }, ...imgs.map((i) => ({ inlineData: { mimeType: i.mime, data: i.b64 } }))] }], generationConfig: cfg }),
 });
 } catch (e) {
 throw new Error(`${modelo}: ${ctl.signal.aborted ? "tempo esgotado" : (e instanceof Error ? e.message : String(e))}`);
 } finally { clearTimeout(t); }
 const j = await r.json().catch(() => ({}));
-if (!r.ok && cfg.thinkingConfig && /thinking/i.test(j?.error?.message || "")) { semPensar[modelo] = true; return chamaModelo(modelo, prompt, json, ms); }
+if (!r.ok && cfg.thinkingConfig && /thinking/i.test(j?.error?.message || "")) { semPensar[modelo] = true; return chamaModelo(modelo, prompt, json, ms, imgs); }
 if (!r.ok) throw new Error(`${modelo}: ${j?.error?.message || r.status}`);
 const txt = j?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
 const limpo = txt.replace(/^[\s\S]*?(\{)/, "$1").replace(/\}[^}]*$/, "}");
@@ -411,22 +413,23 @@ const limpo = String(txt || "").replace(/```(?:json)?/gi, "").replace(/^[\s\S]*?
 try { return JSON.parse(limpo); } catch { throw new Error(`${quem}: resposta fora do formato`); }
 }
 const msgErro = (e: any) => { const m = e instanceof Error ? e.message : String(e); return /abort|timed? ?out|TimeoutError/i.test(m) ? "tempo esgotado" : m; };
-async function chamaClaude(prompt: string, ms = 50000) {
+async function chamaClaude(prompt: string, ms = 50000, imgs: Img[] = []) {
 let r: Response;
 try {
 r = await fetch("https://api.anthropic.com/v1/messages", {
 method: "POST", signal: AbortSignal.timeout(ms),
 headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01" },
-body: JSON.stringify({ model: CLAUDE_MODELO, max_tokens: 4000, temperature: 0.6, system: SISTEMA_JSON, messages: [{ role: "user", content: prompt }] }),
+body: JSON.stringify({ model: CLAUDE_MODELO, max_tokens: 4000, temperature: 0.6, system: SISTEMA_JSON,
+messages: [{ role: "user", content: imgs.length ? [...imgs.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.b64 } })), { type: "text", text: prompt }] : prompt }] }),
 });
 } catch (e) { throw new Error("claude: " + msgErro(e)); }
 const j = await r.json().catch(() => ({}));
 if (!r.ok) throw new Error(`claude: ${j?.error?.message || r.status}`);
 return { modelo: CLAUDE_MODELO, ...extraiJson((j.content || []).map((c: any) => c.text || "").join(""), "claude") };
 }
-async function chamaCompat(nome: string, url: string, chave: string, modelo: string, prompt: string, ms: number, extra: any = {}) {
+async function chamaCompat(nome: string, url: string, chave: string, modelo: string, prompt: string, ms: number, extra: any = {}, imgs: Img[] = []) {
 const corpo: any = { model: modelo, temperature: 0.6, max_tokens: 4000, response_format: { type: "json_object" },
-messages: [{ role: "system", content: SISTEMA_JSON }, { role: "user", content: prompt }], ...extra };
+messages: [{ role: "system", content: SISTEMA_JSON }, { role: "user", content: imgs.length ? [{ type: "text", text: prompt }, ...imgs.map((i) => ({ type: "image_url", image_url: { url: `data:${i.mime};base64,${i.b64}` } }))] : prompt }], ...extra };
 for (let t = 0; t < 2; t++) {
 let r: Response;
 try {
@@ -472,7 +475,7 @@ const lista = [env("OPENROUTER_MODEL"), ...livres].filter(Boolean) as string[];
 if (!lista.length) throw new Error("openrouter: nenhum modelo grátis encontrado");
 return await chamaCompat("openrouter", "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_KEY, lista[0], prompt, ms, lista.length > 1 ? { models: lista.slice(0, 3) } : {});
 }
-async function tentaGemini(prompt: string, leve: boolean, prazo: number, erros: string[], max: number) {
+async function tentaGemini(prompt: string, leve: boolean, prazo: number, erros: string[], max: number, imgs: Img[] = []) {
 if (!GEMINI_KEY) return null;
 if (Date.now() - listaCache.em > 3600e3) listaCache = { em: Date.now(), lista: await modelosDisponiveis() };
 const todos = listaCache.lista;
@@ -483,7 +486,7 @@ for (const m of ordem) {
 for (const json of [true, false]) {
 const resta = prazo - Date.now();
 if (resta < 6000) return null;
-try { const r = await chamaModelo(m, prompt, json, Math.min(45000, resta)); if (!/lite/i.test(m)) modeloBom = m; return r; }
+try { const r = await chamaModelo(m, prompt, json, Math.min(45000, resta), imgs); if (!/lite/i.test(m)) modeloBom = m; return r; }
 catch (e) {
 const msg = String(e instanceof Error ? e.message : e);
 erros.push(msg);
@@ -515,6 +518,21 @@ if (erros.length && erros.every((e) => /quota|exceeded|rate|limit|RESOURCE_EXHAU
 return { erro: "As IAs gratuitas atingiram o limite por agora. Tente de novo mais tarde (os limites voltam ao longo do dia)." };
 if (!erros.length || erros.some((e) => /tempo/.test(e))) return { erro: "A IA demorou demais para responder agora. Tente de novo em instantes." };
 return { erro: "A IA está sobrecarregada agora. Tente de novo em alguns minutos. (" + corta(erros.slice(-2).join(" | "), 240) + ")" };
+}
+
+async function iaVisao(prompt: string, imgs: Img[] = [], leve = false) {
+if (!imgs.length) return gemini(prompt, leve);
+const prazo = Date.now() + 80000, erros: string[] = [];
+if (ANTHROPIC_KEY && !(foraAte.claude > Date.now())) { try { return await chamaClaude(prompt, 55000, imgs); } catch (e) { erros.push(String(e)); } }
+const g = await tentaGemini(prompt, leve, prazo, erros, 3, imgs);
+if (g) return g;
+if (GROQ_KEY && prazo - Date.now() > 10000) {
+try { return await chamaCompat("groq", "https://api.groq.com/openai/v1/chat/completions", GROQ_KEY, env("GROQ_VISION_MODEL") || "meta-llama/llama-4-scout-17b-16e-instruct", prompt, Math.min(40000, prazo - Date.now()), {}, imgs.slice(0, 5)); }
+catch (e) { erros.push(String(e)); }
+}
+console.error("visao", erros.join(" | ").slice(0, 500));
+const t: any = await gemini(prompt + "\n(As imagens não puderam ser vistas agora; use só as informações de texto.)", leve);
+return t.erro ? t : { ...t, sem_imagens: true };
 }
 
 function montaPrompt(loja: any, minhaIg: any, c: any, site: any, ig: any, mudancas: string[]) {
@@ -800,266 +818,8 @@ await db.from("uso_ia").upsert({ user_id: uid, mes: mesAtual(), total: usado + 1
 return null;
 }
 const PRECISA: Record<string, string> = { perfil: "perfil", calendario: "calendario", campanha: "campanhas", reescrever: "inspiracoes", gerar: "gerador", indice: "indice",
-ajustar: "gerador", voz: "gerador", produtos: "gerador", imagem: "gerador", google: "avaliacoes", responder: "avaliacoes" };
+ajustar: "gerador", voz: "gerador", produtos: "gerador", imagem: "gerador", marca: "gerador", briefing: "gerador", carrossel: "gerador", pagina: "gerador", google: "avaliacoes", responder: "avaliacoes" };
 const NOME_REC: Record<string, string> = { perfil: "Meu perfil", calendario: "Calendário", campanhas: "Campanhas", inspiracoes: "Inspirações", gerador: "Criar com IA", indice: "Índice do nicho", aprovacao: "Aprovação do cliente", avaliacoes: "Avaliações do Google", whatsapp: "Alertas no WhatsApp" };
-
-const PEDIDOS: Record<string, string> = {
-post: `um POST COMPLETO pronto para publicar`,
-legenda: `3 legendas prontas, cada uma com gancho forte na primeira linha, emojis moderados e chamada para ação`,
-roteiro: `2 roteiros de Reels de 15 a 30 segundos, com cenas e tempos (0-3s, 3-12s, 12-24s, 24-30s), texto na tela e áudio sugerido`,
-carrossel: `1 carrossel de 6 a 8 telas: texto de cada tela (capa que prende, conteúdo, tela final com chamada) e a legenda`,
-stories: `uma sequência de 5 a 7 stories para hoje, com o que mostrar, o texto de cada um e pelo menos uma enquete ou caixinha`,
-hashtags: `3 grupos de hashtags (alcance, nicho e local), 8 a 10 em cada, sem hashtags proibidas ou genéricas demais`,
-ideias: `10 ideias de posts variadas (formato + título + por que funciona, citando o dado em que se baseia)`,
-anuncio: `2 anúncios para Instagram/Facebook (título curto + texto + chamada) e sugestão de público e verba diária`,
-whatsapp: `3 mensagens curtas para lista de transmissão ou status do WhatsApp, com chamada para responder`,
-};
-const AJUSTES: Record<string, string> = {
-curto: "deixe bem mais curto e direto, mantendo a ideia e a chamada para ação",
-vendedor: "deixe mais vendedor: benefício claro, urgência honesta (sem inventar prazo ou desconto) e chamada para ação forte",
-divertido: "deixe mais divertido e leve, com humor do dia a dia, sem perder a chamada para ação",
-formal: "deixe mais profissional e elegante",
-outra: "escreva uma versão totalmente diferente, com outro gancho e outra estrutura",
-emoji: "tire quase todos os emojis",
-};
-
-function vozTxt(emp: any) {
-const v = emp?.voz || {};
-const partes = [v.resumo && `jeito de falar: ${v.resumo}`, v.tom && `tom: ${v.tom}`, v.emojis && `emojis: ${v.emojis}`, v.tamanho && `tamanho das legendas: ${v.tamanho}`,
-v.cta && `chamada para ação preferida: ${v.cta}`, v.expressoes?.length && `expressões da marca: ${v.expressoes.join(", ")}`,
-v.evitar?.length && `evitar: ${v.evitar.join(", ")}`, v.regras && `REGRAS DO DONO (obrigatórias): ${String(v.regras).slice(0, 600)}`].filter(Boolean);
-return partes.length ? partes.join(" | ") : "ainda não definida (use um tom natural, próximo e claro)";
-}
-
-function melhoresHorarios(conc: any[]) {
-const dias: Record<string, { n: number; s: number }> = {}, faixas: Record<string, { n: number; s: number }> = {};
-conc.forEach((c) => {
-(c.ritmo?.dias || []).forEach((d: any) => { dias[d.dia] = dias[d.dia] || { n: 0, s: 0 }; dias[d.dia].n += d.posts; dias[d.dia].s += d.media * d.posts; });
-(c.ritmo?.faixas || []).forEach((d: any) => { faixas[d.faixa] = faixas[d.faixa] || { n: 0, s: 0 }; faixas[d.faixa].n += d.posts; faixas[d.faixa].s += d.media * d.posts; });
-});
-const top = (o: any) => Object.entries(o).map(([k, v]: any) => ({ k, media: v.n ? Math.round(v.s / v.n) : 0, posts: v.n })).filter((x) => x.posts >= 2).sort((a, b) => b.media - a.media).slice(0, 3);
-return { dias: top(dias), faixas: top(faixas) };
-}
-
-async function aprendizados(emp: any) {
-const { data } = await db.from("conteudos").select("titulo,tipo,dados,desempenho").eq("empresa_id", emp.id).not("desempenho", "is", null).order("criado_em", { ascending: false }).limit(30);
-const l = (data || []).filter((x: any) => x.desempenho?.vezes_media != null).sort((a: any, b: any) => b.desempenho.vezes_media - a.desempenho.vezes_media);
-const fmt = (x: any) => ({ titulo: x.titulo, formato: x.dados?.formato || x.tipo, gancho: corta(x.dados?.gancho || x.dados?.legenda || "", 140), vezes_media: x.desempenho.vezes_media });
-return { melhores: l.slice(0, 3).map(fmt), piores: l.length > 3 ? l.slice(-2).map(fmt) : [] };
-}
-
-async function meusProdutos(emp: any, ler = false) {
-const { data: a } = await db.from("analises").select("dados,criado_em").eq("empresa_id", emp.id).eq("tipo", "meus_produtos").eq("chave", "atual").maybeSingle();
-if (!ler) return a?.dados || null;
-if (!emp.site) return { erro: "Cadastre o site da sua loja em Minha loja para o Radar ler seus produtos." };
-const s: any = await lerSite(emp.site);
-if (!s.ok) return { erro: "Não conseguimos ler o seu site agora. (" + corta(s.erro || "erro", 120) + ")" };
-const dados = { produtos: (s.produtos || []).slice(0, 24), promocoes: s.promocoes || [], url: s.url, lido_em: new Date().toISOString() };
-await salva(emp, "meus_produtos", "atual", dados);
-return dados;
-}
-
-async function aprenderVoz(emp: any) {
-const meu: any = emp.instagram ? await lerInstagram(emp.instagram, 30) : { ok: false };
-if (!meu.ok) return { erro: "Não conseguimos ler o Instagram da sua loja. Ele precisa ser uma conta Comercial ou de Criador." };
-const legs = meu.posts.map((p: any) => p.legenda).filter((x: string) => x && x.length > 20).slice(0, 30);
-if (legs.length < 3) return { erro: "Seu Instagram tem poucas legendas para a IA aprender o seu jeito. Escreva as regras da marca à mão." };
-const ia: any = await gemini(`Analise as legendas reais desta loja no Instagram e descreva a VOZ DA MARCA para que outra pessoa escreva igual.
-LOJA: ${lojaTxt(emp)}
-LEGENDAS (mais recentes primeiro): ${JSON.stringify(legs.map((l: string) => corta(l, 400)))}
-Responda APENAS com este JSON:
-{"resumo": "1-2 frases sobre o jeito de falar", "tom": "3 adjetivos", "emojis": "quanto e quais usa", "tamanho": "curtas, médias ou longas", "cta": "como costuma chamar para ação",
-"expressoes": ["até 6 expressões ou bordões que a marca repete"], "evitar": ["até 4 coisas que destoam da marca"], "exemplo": "uma legenda nova curta escrita nesse estilo"}`);
-if (ia.erro) return ia;
-const voz = { ...ia, regras: emp.voz?.regras || "", aprendida_em: new Date().toISOString(), legendas_lidas: legs.length };
-delete (voz as any).modelo;
-await db.from("empresas").update({ voz }).eq("id", emp.id);
-return voz;
-}
-
-async function baseDoAlerta(uid: string, alertaId: string) {
-const { data: a } = await db.from("alertas").select("*").eq("id", alertaId).eq("user_id", uid).maybeSingle();
-if (!a) return null;
-return { origem: "alerta", tipo_alerta: a.tipo, titulo: a.titulo, texto: a.texto, link: a.link };
-}
-
-async function gerarLivre(emp: any, b: any) {
-const tipo = PEDIDOS[b.tipo] ? b.tipo : "post";
-const [{ conc, meu }, aprend] = await Promise.all([contexto(emp), aprendizados(emp)]);
-const prods: any = b.produto ? null : await meusProdutos(emp).catch(() => null);
-const horarios = melhoresHorarios(conc);
-const virais = conc.flatMap((c: any) => (c.top_posts || []).filter((p: any) => (p.vezes_media || 0) >= 1.5).map((p: any) => ({ concorrente: c.nome, ...p })))
-.sort((x: any, y: any) => (y.vezes_media || 0) - (x.vezes_media || 0)).slice(0, 8);
-const meusMelhores = meu.ok ? [...meu.posts].sort((x: any, y: any) => (y.vezes_media || 0) - (x.vezes_media || 0)).slice(0, 5)
-.map((p: any) => ({ tipo: p.tipo, legenda: corta(p.legenda || "", 200), vezes_media: p.vezes_media })) : [];
-const base = b.alerta_id ? await baseDoAlerta(emp.user_id, b.alerta_id) : b.base || null;
-const qtd = Math.min(2, Math.max(1, Number(b.versoes) || 1));
-const formatoPost = tipo === "post"
-? `"itens": ${qtd} item(ns), cada um: {"titulo": "nome da ideia", "formato": "Reels|Carrossel|Foto|Stories", "gancho": "frase dos 3 primeiros segundos ou primeira linha", "capa": "texto curto para a capa/arte (até 8 palavras)",
-"roteiro": ["cenas ou telas, na ordem, com tempo quando for vídeo"], "legenda": "legenda completa pronta", "hashtags": ["8 a 12"], "stories": ["2 a 3 stories para divulgar o post"],
-"quando": "dia e horário sugeridos, usando os horários reais do nicho", "baseado_em": "qual dado real inspirou (post de concorrente, seu melhor post, promoção, aprendizado)", "texto": "a legenda completa de novo"}`
-: `"itens": cada item {"titulo": "nome", "texto": "conteúdo completo pronto para copiar", "baseado_em": "qual dado real inspirou (curto)"}`;
-const prompt = `Você é o melhor social media de pequenos negócios do Brasil. ${ADAPTA} Português do Brasil.
-Crie: ${PEDIDOS[tipo]}${qtd > 1 && tipo === "post" ? " — 2 versões bem diferentes para teste A/B" : ""}.
-MINHA LOJA: ${lojaTxt(emp)}
-VOZ DA MARCA: ${vozTxt(emp)}
-${b.tom && b.tom !== "voz" ? `TOM PEDIDO AGORA: ${String(b.tom).slice(0, 80)}` : ""}
-TEMA PEDIDO: ${String(b.tema || "livre: escolha o tema com mais chance de resultado agora, pelos dados abaixo").slice(0, 400)}
-${b.produto ? `PRODUTO EM DESTAQUE (real, do meu site): ${JSON.stringify(b.produto).slice(0, 400)}` : prods?.produtos?.length ? `MEUS PRODUTOS (reais, do meu site; use se combinar com o tema): ${JSON.stringify(prods.produtos.slice(0, 10).map((p: any) => ({ nome: p.nome, preco: p.preco })))}` : ""}
-${base ? `RESPONDER A ESTE MOVIMENTO DA CONCORRÊNCIA (o post deve rebater sem citar o nome dela e sem guerra de preço se não for preciso): ${JSON.stringify(base).slice(0, 700)}` : ""}
-POSTS QUE MAIS FUNCIONARAM NAS CONCORRENTES (dados reais; vezes_media = quantas vezes a média de interações): ${JSON.stringify(virais).slice(0, 2500)}
-MEUS POSTS QUE MAIS FUNCIONARAM: ${JSON.stringify(meusMelhores).slice(0, 1200)}
-O QUE JÁ FUNCIONOU COM POSTS CRIADOS AQUI (medido no meu Instagram): ${JSON.stringify(aprend).slice(0, 900)}
-PROMOÇÕES ATIVAS DAS CONCORRENTES: ${JSON.stringify(conc.map((c: any) => ({ nome: c.nome, promocoes: (c.promocoes || []).slice(0, 3), preco_tipico: c.preco_tipico }))).slice(0, 900)}
-MELHORES DIAS E FAIXAS DE HORÁRIO DO NICHO (média de interações): ${JSON.stringify(horarios)}
-Hoje é ${hoje()}.
-Regras: use a estrutura e o gancho do que funcionou, mas com palavras ORIGINAIS (nunca copie frases das concorrentes). Não invente preço, desconto, prazo ou dado que não esteja aqui. Siga a voz da marca e as regras do dono.
-Responda APENAS com este JSON:
-{"titulo": "título curto do resultado", ${formatoPost}, "dica": "1 dica prática de uso"}`;
-const r: any = await gemini(prompt);
-if (r.erro) return r;
-(r.itens || []).forEach((it: any) => { if (!it.texto && it.legenda) it.texto = it.legenda; });
-return { ...r, tipo, base_usada: base ? base.titulo || "movimento da concorrente" : null };
-}
-
-async function ajustarTexto(emp: any, texto: string, pedido: string) {
-const como = AJUSTES[pedido] || AJUSTES.outra;
-const r: any = await gemini(`Reescreva o texto abaixo para a loja (${lojaTxt(emp)}). ${como}.
-VOZ DA MARCA: ${vozTxt(emp)}
-Não invente preço, desconto ou prazo. Mantenha emojis só se combinarem com a voz da marca.
-TEXTO: """${String(texto || "").slice(0, 2500)}"""
-Responda APENAS com este JSON: {"texto": "novo texto completo"}`, true);
-return r.erro ? r : { texto: r.texto || "" };
-}
-
-const palavras = (s: string) => new Set(String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3).slice(0, 40));
-function parecido(a: string, b: string) {
-const A = palavras(a), B = palavras(b);
-if (A.size < 4 || B.size < 4) return 0;
-let i = 0; A.forEach((w) => { if (B.has(w)) i++; });
-return i / Math.min(A.size, B.size);
-}
-async function medirConteudos() {
-const desde = new Date(Date.now() - 45 * 86400e3).toISOString();
-const { data: cs } = await db.from("conteudos").select("id,empresa_id,dados,status,desempenho,criado_em").in("status", ["agendado", "postado", "rascunho"])
-.gte("criado_em", desde).order("criado_em", { ascending: false }).limit(300);
-const porLoja: Record<string, any[]> = {};
-(cs || []).filter((c: any) => !c.desempenho || Date.now() - Date.parse(c.desempenho.lido_em || 0) > 20 * 3600e3)
-.forEach((c: any) => (porLoja[c.empresa_id] = porLoja[c.empresa_id] || []).push(c));
-let n = 0;
-for (const [eid, lista] of Object.entries(porLoja).slice(0, 3)) {
-const { data: emp } = await db.from("empresas").select("instagram").eq("id", eid).maybeSingle();
-if (!emp?.instagram) continue;
-const ig: any = await lerInstagram(emp.instagram, 30);
-if (!ig.ok) continue;
-for (const c of lista) {
-const leg = c.dados?.legenda || c.dados?.texto || "";
-const p = ig.posts.filter((p: any) => Date.parse(p.data) >= Date.parse(c.criado_em) - 3600e3)
-.map((p: any) => ({ p, s: parecido(leg, p.legenda) })).sort((x: any, y: any) => y.s - x.s)[0];
-if (p && p.s >= 0.45) {
-await db.from("conteudos").update({ status: "postado", postado_em: p.p.data, post_link: p.p.link,
-desempenho: { curtidas: p.p.curtidas, comentarios: p.p.comentarios, vezes_media: p.p.vezes_media, lido_em: new Date().toISOString() } }).eq("id", c.id);
-n++;
-}
-}
-}
-return n;
-}
-
-const GOOGLE_KEY = env("GOOGLE_PLACES_KEY");
-async function lerGoogle(consulta: string) {
-if (!GOOGLE_KEY) return { ok: false, erro: "google_nao_configurado" };
-try {
-const r = await fetch("https://places.googleapis.com/v1/places:searchText", {
-method: "POST",
-headers: { "Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_KEY,
-"X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri,places.reviews" },
-body: JSON.stringify({ textQuery: consulta, languageCode: "pt-BR", regionCode: "BR", pageSize: 1 }),
-});
-const j = await r.json();
-if (!r.ok) return { ok: false, erro: j?.error?.message || String(r.status) };
-const p = j.places?.[0];
-if (!p) return { ok: false, erro: "nao_encontrado" };
-return {
-ok: true, id: p.id, nome: p.displayName?.text || "", endereco: p.formattedAddress || "", nota: p.rating ?? null, avaliacoes: p.userRatingCount ?? 0, link: p.googleMapsUri || "",
-reviews: (p.reviews || []).map((v: any) => ({ nota: v.rating, texto: corta(v.text?.text || v.originalText?.text || "", 600), autor: v.authorAttribution?.displayName || "", quando: v.relativePublishTimeDescription || "", data: v.publishTime || "" })),
-};
-} catch (e) { return { ok: false, erro: e instanceof Error ? e.message : String(e) }; }
-}
-async function atualizarGoogle(emp: any) {
-const { data: cs } = await db.from("concorrentes").select("id,nome,cidade,instagram").eq("empresa_id", emp.id).eq("pausada", false).limit(15);
-const cidade = emp.cidade || "";
-const eu = await lerGoogle(`${emp.nome_fantasia} ${cidade}`.trim());
-if (!eu.ok && (eu as any).erro === "google_nao_configurado") return { erro: "As avaliações do Google ainda não foram ativadas no Radar." };
-const conc: any[] = [];
-for (const c of cs || []) conc.push({ id: c.id, nome: c.nome, ...(await lerGoogle(`${c.nome} ${c.cidade || cidade}`.trim())) });
-let resumo: any = null;
-const ruins = conc.flatMap((c) => (c.reviews || []).filter((v: any) => v.nota <= 3).map((v: any) => ({ concorrente: c.nome, nota: v.nota, texto: v.texto })));
-if (ruins.length) {
-resumo = await gemini(`Avaliações negativas reais das concorrentes da loja ${lojaTxt(emp)} no Google:
-${JSON.stringify(ruins).slice(0, 4000)}
-Resuma o que os clientes reclamam delas e como a minha loja pode usar isso (sem citar nomes nas redes).
-Responda APENAS com este JSON: {"reclamacoes": ["até 4 reclamações que se repetem"], "oportunidades": [{"titulo": "ação", "texto": "como fazer em 1 frase"}]}`, true);
-if (resumo?.erro) resumo = null;
-}
-const dados = { eu, conc, resumo, lido_em: new Date().toISOString() };
-await salva(emp, "google", "atual", dados);
-return dados;
-}
-async function googleDoDia() {
-if (!GOOGLE_KEY) return 0;
-const { data: es } = await db.from("empresas").select("*").limit(500);
-const { data: lidas } = await db.from("analises").select("empresa_id,criado_em").eq("tipo", "google");
-const ult: Record<string, number> = {};
-(lidas || []).forEach((x: any) => { ult[x.empresa_id] = Date.parse(x.criado_em); });
-let n = 0;
-for (const e of es || []) {
-if (n >= 2) break;
-if (Date.now() - (ult[e.id] || 0) < 24 * 3600e3) continue;
-if (!tem(await planoDe(e.user_id), "avaliacoes")) continue;
-await atualizarGoogle(e); n++;
-}
-return n;
-}
-async function responderAvaliacao(emp: any, v: any) {
-const r: any = await gemini(`Escreva a resposta pública do dono da loja a esta avaliação no Google.
-LOJA: ${lojaTxt(emp)}
-VOZ DA MARCA: ${vozTxt(emp)}
-AVALIAÇÃO (${Number(v?.nota) || "?"} estrelas, de ${String(v?.autor || "cliente").slice(0, 60)}): """${String(v?.texto || "").slice(0, 1200)}"""
-Regras: agradeça pelo nome, seja específico sobre o que a pessoa disse, nunca discuta. Se for negativa, peça desculpas sem culpar o cliente e ofereça resolver por um canal privado. Até 600 caracteres.
-Responda APENAS com este JSON: {"texto": "resposta pronta"}`, true);
-return r.erro ? r : { texto: r.texto || "" };
-}
-
-const WA_TOKEN = env("WA_TOKEN"), WA_PHONE_ID = env("WA_PHONE_ID"), WA_TEMPLATE = env("WA_TEMPLATE") || "radar_alerta", WA_LANG = env("WA_LANG") || "pt_BR";
-const numeroWa = (s: string) => { let d = String(s || "").replace(/\D/g, ""); if (d.length === 10 || d.length === 11) d = "55" + d; return d.length >= 12 ? d : ""; };
-async function enviaWhatsApp(numero: string, texto: string) {
-const para = numeroWa(numero);
-if (!WA_TOKEN || !WA_PHONE_ID || !para) return false;
-const limpo = String(texto).replace(/[\r\n\t]+/g, " · ").replace(/ {4,}/g, "   ").slice(0, 900);
-try {
-const r = await fetch(`${GRAPH}/${WA_PHONE_ID}/messages`, {
-method: "POST", headers: { Authorization: `Bearer ${WA_TOKEN}`, "Content-Type": "application/json" },
-body: JSON.stringify({ messaging_product: "whatsapp", to: para, type: "template",
-template: { name: WA_TEMPLATE, language: { code: WA_LANG }, components: [{ type: "body", parameters: [{ type: "text", text: limpo }] }] } }),
-});
-if (!r.ok) console.error("whatsapp", r.status, await r.text().catch(() => ""));
-return r.ok;
-} catch (e) { console.error("whatsapp", e); return false; }
-}
-
-async function imagemComoDados(url: string) {
-if (!/^https:\/\//i.test(url || "")) return { erro: "Endereço de imagem inválido." };
-try {
-const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "image/*" } });
-const tipo = r.headers.get("content-type") || "";
-if (!r.ok || !/^image\/(png|jpe?g|webp|gif)/i.test(tipo)) return { erro: "Não foi possível baixar a imagem." };
-const buf = new Uint8Array(await r.arrayBuffer());
-if (buf.length > 3_000_000) return { erro: "Imagem grande demais." };
-let bin = ""; for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode(...buf.subarray(i, i + 32768));
-return { dados: `data:${tipo.split(";")[0]};base64,${btoa(bin)}` };
-} catch { return { erro: "Não foi possível baixar a imagem." }; }
-}
 
 async function indiceNicho(emp: any) {
 const { data: lojas } = await db.from("empresas").select("id").eq("segmento", emp.segmento).limit(400);
@@ -1154,7 +914,7 @@ const p = await planoDe(uid);
 const { data: pf } = await db.from("perfis").select("email,nome,whatsapp,whatsapp_alertas").eq("id", uid).maybeSingle();
 if (tem(p, "whatsapp") && pf?.whatsapp_alertas && pf?.whatsapp) {
 const txt = `${lista.length} novidade(s) nas concorrentes: ` + lista.slice(0, 4).map((a) => a.titulo).join(" | ");
-await enviaWhatsApp(pf.whatsapp, txt);
+await CR.enviaWhatsApp(pf.whatsapp, txt);
 }
 if (tem(p, "alertas")) {
 const corpo = `<p>Olá, ${esc((pf?.nome || "").split(" ")[0])}! O Radar encontrou novidades nas suas concorrentes:</p>` + lista.slice(0, 12).map((a) =>
@@ -1281,6 +1041,8 @@ const { data } = await db.from("empresas").select("*").eq("user_id", uid).order(
 return data;
 }
 
+const CR = montaCriacao({ db, corta, lerSite, salva, lerInstagram, gemini, iaVisao, lojaTxt, contexto, ADAPTA, hoje, env, tem, planoDe, GRAPH, UA, baixa, urlDe });
+
 Deno.serve(async (req: Request) => {
 if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
 try {
@@ -1339,8 +1101,8 @@ for (const t of ts || []) { try { await atualizarTermo(t); termos++; } catch { /
 const emails = await emailsDeAlerta().catch(() => 0);
 const relatorios = await relatoriosMensais().catch(() => 0);
 await db.from("tarefas").delete().lt("criado_em", new Date(Date.now() - 86400e3).toISOString()).then(() => {}, () => {});
-const medidos = await medirConteudos().catch((e) => { console.error("medir", e); return 0; });
-const google = await googleDoDia().catch((e) => { console.error("google", e); return 0; });
+const medidos = await CR.medirConteudos().catch((e) => { console.error("medir", e); return 0; });
+const google = await CR.googleDoDia().catch((e) => { console.error("google", e); return 0; });
 return resp({ verificados: feitos.length, feitos, termos, emails, relatorios, medidos, google });
 }
 
@@ -1389,7 +1151,7 @@ const emp = await empresaDo(uid, body.empresa_id);
 if (!emp && body.acao) return resp({ erro: "Loja não encontrada." }, 404);
 const rec = PRECISA[body.acao];
 if (rec && !tem(p, rec)) return resp({ erro: `${NOME_REC[rec] || "Este recurso"} não está no plano ${p.nome}. Veja os planos para liberar.`, bloqueado: rec }, 403);
-if (["perfil", "calendario", "campanha", "reescrever", "gerar", "ajustar", "voz", "responder", "google"].includes(body.acao)) {
+if (["perfil", "calendario", "campanha", "reescrever", "gerar", "ajustar", "voz", "responder", "google", "marca", "carrossel", "pagina"].includes(body.acao)) {
 const lim = await gastaIA(uid, p);
 if (lim) return resp(lim, 429);
 }
@@ -1398,13 +1160,17 @@ if (body.acao === "perfil") return await bg(() => analisarPerfil(emp));
 if (body.acao === "calendario") return await bg(() => gerarCalendario(emp, body.datas || []));
 if (body.acao === "reescrever") return await bg(() => reescreverLegenda(emp, body.legenda, body.concorrente, body.tipo));
 if (body.acao === "campanha") return await bg(() => gerarCampanha(emp, body.data));
-if (body.acao === "gerar") return await bg(() => gerarLivre(emp, body));
-if (body.acao === "ajustar") return await bg(() => ajustarTexto(emp, body.texto, body.pedido));
-if (body.acao === "voz") return await bg(() => aprenderVoz(emp));
-if (body.acao === "produtos") return await bg(() => meusProdutos(emp, true));
-if (body.acao === "imagem") return resp(await imagemComoDados(String(body.url || "")));
-if (body.acao === "google") return await bg(() => atualizarGoogle(emp));
-if (body.acao === "responder") return await bg(() => responderAvaliacao(emp, body.avaliacao));
+if (body.acao === "gerar") return await bg(() => CR.gerarLivre(emp, body));
+if (body.acao === "ajustar") return await bg(() => CR.ajustarTexto(emp, body.texto, body.pedido));
+if (body.acao === "voz") return await bg(() => CR.aprenderVoz(emp));
+if (body.acao === "marca") return await bg(() => CR.perfilMarca(emp));
+if (body.acao === "briefing") return await bg(() => CR.briefing(emp, body));
+if (body.acao === "carrossel") return await bg(() => CR.gerarCarrossel(emp, body));
+if (body.acao === "pagina") return await bg(() => CR.refazerPagina(emp, body));
+if (body.acao === "produtos") return await bg(() => CR.meusProdutos(emp, true));
+if (body.acao === "imagem") return resp(await CR.imagemComoDados(String(body.url || "")));
+if (body.acao === "google") return await bg(() => CR.atualizarGoogle(emp));
+if (body.acao === "responder") return await bg(() => CR.responderAvaliacao(emp, body.avaliacao));
 if (body.acao === "indice") return await bg(async () => { const r = await indiceNicho(emp); await salva(emp, "indice", "atual", r); return r; });
 if (body.acao === "termo") {
 const { data: t } = await db.from("termos").select("*").eq("id", body.termo_id).eq("user_id", uid).maybeSingle();
