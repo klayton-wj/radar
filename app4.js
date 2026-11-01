@@ -128,7 +128,7 @@ async function carrSaida(modo){const fs=await arquivosCarr();if(!fs.length)retur
  for(const f of fs){const a=document.createElement('a');a.href=URL.createObjectURL(f);a.download=f.name;document.body.appendChild(a);a.click();a.remove();await new Promise(r=>setTimeout(r,350))}toast(fs.length+' imagens baixadas'+(modo==='compartilhar'?'. Abra o Instagram e escolha várias fotos para o carrossel.':''))}
 
 async function geraFundoIA(pg,silencioso){const B=CARR.briefing||{},V=B.visual||{};const r=await acao('imagem_ia',{prompt:pg.imagem||'',pagina:{titulo:pg.titulo,texto:pg.texto,layout:pg.layout},cores:(V.cores||[]).filter(hexOk),estilo:V.estilo||''});
- if(r.erro){if(!silencioso||/cota|limite|imagens por IA de hoje/.test(r.erro))toast(r.erro);return null}if(typeof r.restam==='number'&&!silencioso)toast('Fundo criado! Restam '+r.restam+' imagens por IA hoje.');return r.dados||null}
+ if(r.erro){toast((silencioso?'Fundo da capa por IA: ':'')+r.erro);return null}if(!r.dados){toast('A IA de imagens não devolveu a imagem.');return null}if(typeof r.restam==='number'&&!silencioso)toast('Fundo criado! Restam '+r.restam+' imagens por IA hoje.');return r.dados||null}
 /* ---------- eventos ---------- */
 document.addEventListener('change',e=>{const t=e.target;if(!t)return;if(t.name==='gTipo'){tipoCriar=t.value;if(tipoCriar!=='carrossel'||!CARR){}route();return}if(t.id==='cImgs'&&t.files&&t.files.length){addImagens(t.files)}});
 document.addEventListener('input',e=>{if(e.target&&e.target.id==='gTema')temaCriar=e.target.value});
