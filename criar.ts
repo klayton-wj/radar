@@ -367,7 +367,7 @@ if (ia.erro) return ia;
 return { ...limpaIA(ia), tipo, pedido: b.pedido || "" };
 }
 
-const FORMATO_PAGINA = `{"layout": "capa|topicos|numero|frase|foto|cta", "titulo": "até 8 palavras", "texto": "até 28 palavras", "itens": ["até 4 itens de até 6 palavras"], "destaque": "número ou palavra curta (opcional)", "emoji": "1 emoji (opcional)", "foto": índice da foto enviada ou null, "imagem": "em INGLÊS: descrição de um fundo ou ilustração para esta página (cenário, textura, objetos, luz, cores da marca), SEM texto, SEM letras, SEM logotipos, SEM pessoas reais e SEM mostrar o produto da loja"}`;
+const FORMATO_PAGINA = `{"layout": "capa|topicos|numero|frase|foto|cta", "rotulo": "2 a 3 palavras que situam a página (ex.: PASSO 1, VOCÊ SABIA?)", "titulo": "até 7 palavras, com 1 ou 2 palavras-chave entre *asteriscos*", "texto": "até 28 palavras", "itens": ["até 4 itens de até 6 palavras"], "destaque": "número ou palavra curta (opcional)", "emoji": "1 emoji (opcional)", "foto": índice da foto enviada ou null, "imagem": "em INGLÊS: descrição de um fundo ou ilustração para esta página (cenário, textura, objetos, luz, cores da marca), SEM texto, SEM letras, SEM logotipos, SEM pessoas reais e SEM mostrar o produto da loja"}`;
 async function gerarCarrossel(emp: any, b: any) {
 const br = b.briefing || {};
 const nf = Math.max(0, Math.min(10, Number(b.fotos) || 0));
@@ -379,7 +379,7 @@ LOJA: ${lojaTxt(emp)}
 VOZ DA MARCA: ${vozTxt(emp)}
 ${prods?.produtos?.length ? `PRODUTOS REAIS (use só se combinar): ${JSON.stringify(prods.produtos.slice(0, 8).map((p: any) => ({ nome: p.nome, preco: p.preco })))}` : ""}
 FOTOS ENVIADAS PELO DONO: ${nf} (índices de 0 a ${Math.max(0, nf - 1)}). ${nf ? "Use TODAS as fotos, cada uma em uma página (layout foto ou na capa), na ordem que fizer sentido." : "Não use fotos (foto sempre null)."}
-Regras: página 1 é "capa" com o gancho; a última é "cta" com a chamada; textos curtos e fáceis de ler no celular; varie os layouts; não invente preço, desconto ou prazo; NUNCA invente depoimentos, avaliações, números de clientes ou falas atribuídas a clientes (o layout "frase" é só para frases da própria marca); siga as regras do dono.
+Regras: títulos curtos e fortes, cada um com 1 ou 2 palavras-chave entre *asteriscos* (viram destaque na arte); textos de no máximo 2 frases curtas; página 1 é "capa" com o gancho; a última é "cta" com a chamada; textos curtos e fáceis de ler no celular; varie os layouts; não invente preço, desconto ou prazo; NUNCA invente depoimentos, avaliações, números de clientes ou falas atribuídas a clientes (o layout "frase" é só para frases da própria marca); siga as regras do dono.
 Responda APENAS com este JSON:
 {"titulo": "nome curto do carrossel", "paginas": [${FORMATO_PAGINA}], "legenda": "legenda completa pronta, com chamada para ação", "hashtags": ["8 a 12"]}
 "paginas": exatamente ${Math.max(5, Math.min(8, Number(br.paginas) || 6))} páginas.`);
