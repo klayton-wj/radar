@@ -1,4 +1,4 @@
-import { montaCriacao } from "./criar.ts?v=20";
+import { montaCriacao } from "./criar.ts?v=21";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 
 const env = (k: string) => Deno.env.get(k) ?? "";
@@ -1056,6 +1056,24 @@ if (id && /preapproval/.test(tipo) && MP_TOKEN) { try { await sincronizaAssinatu
 return resp({ ok: true });
 }
 
+if (url.searchParams.get("diag") === "img") {
+if (Date.now() - ultimoDiag < 60e3) return resp({ erro: "Espere 1 minuto entre diagnósticos." }, 429);
+ultimoDiag = Date.now();
+const conta = env("CF_ACCOUNT_ID"), tok = env("CF_API_TOKEN"), modelo = env("CF_IMAGE_MODEL") || "@cf/black-forest-labs/flux-1-schnell";
+const out: any = { tem_id_da_conta: !!conta, tamanho_id: conta.length, tem_chave: !!tok, modelo };
+if (!conta || !tok) return resp({ ...out, erro: "Faltam os Secrets CF_ACCOUNT_ID e/ou CF_API_TOKEN no Supabase." });
+if (/\s/.test(conta + tok)) out.aviso = "O ID ou a chave têm espaço ou quebra de linha. Cole de novo sem espaços.";
+const t0 = Date.now();
+try {
+const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${conta.trim()}/ai/run/${modelo}`, { method: "POST", signal: AbortSignal.timeout(60000),
+headers: { Authorization: `Bearer ${tok.trim()}`, "Content-Type": "application/json" }, body: JSON.stringify({ prompt: "minimal red abstract background, no text", steps: 4 }) });
+const tipo = r.headers.get("content-type") || "";
+out.status = r.status; out.ms = Date.now() - t0; out.tipo_resposta = tipo;
+if (/json/.test(tipo)) { const j: any = await r.json().catch(() => ({})); out.ok = !!j?.result?.image; out.tamanho_imagem = (j?.result?.image || "").length; if (!out.ok) out.resposta = JSON.stringify({ success: j?.success, errors: j?.errors, messages: j?.messages }).slice(0, 600); }
+else { const b = await r.arrayBuffer(); out.ok = r.ok && b.byteLength > 1000; out.tamanho_imagem = b.byteLength; }
+} catch (e) { out.ok = false; out.erro = String(e).slice(0, 300); out.ms = Date.now() - t0; }
+return resp(out);
+}
 if (url.searchParams.get("diag") === "1") {
 if (Date.now() - ultimoDiag < 60e3) return resp({ erro: "Espere 1 minuto entre diagnósticos." }, 429);
 ultimoDiag = Date.now();
