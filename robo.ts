@@ -403,54 +403,117 @@ const esgotado: Record<string, number> = {}; // modelo -> até quando evitar (co
 let listaCache: { em: number; lista: string[] } = { em: 0, lista: [] };
 const ANTHROPIC_KEY = env("ANTHROPIC_API_KEY");
 const CLAUDE_MODELO = env("CLAUDE_MODEL") || "claude-haiku-5-5";
-let claudeFora = 0;
+const GROQ_KEY = env("GROQ_API_KEY"), OPENROUTER_KEY = env("OPENROUTER_API_KEY");
+const SISTEMA_JSON = "Você responde sempre em português do Brasil e APENAS com um objeto JSON válido, sem texto antes ou depois e sem cercas de código.";
+const foraAte: Record<string, number> = {}; // provedor/modelo -> até quando evitar
+function extraiJson(txt: string, quem: string) {
+const limpo = String(txt || "").replace(/```(?:json)?/gi, "").replace(/^[\s\S]*?(\{)/, "$1").replace(/\}[^}]*$/, "}");
+try { return JSON.parse(limpo); } catch { throw new Error(`${quem}: resposta fora do formato`); }
+}
+const msgErro = (e: any) => { const m = e instanceof Error ? e.message : String(e); return /abort|timed? ?out|TimeoutError/i.test(m) ? "tempo esgotado" : m; };
 async function chamaClaude(prompt: string, ms = 50000) {
-const r = await fetch("https://api.anthropic.com/v1/messages", {
+let r: Response;
+try {
+r = await fetch("https://api.anthropic.com/v1/messages", {
 method: "POST", signal: AbortSignal.timeout(ms),
 headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01" },
-body: JSON.stringify({ model: CLAUDE_MODELO, max_tokens: 4000, temperature: 0.6,
-system: "Você responde sempre em português do Brasil e APENAS com um objeto JSON válido, sem texto antes ou depois e sem cercas de código.",
-messages: [{ role: "user", content: prompt }] }),
+body: JSON.stringify({ model: CLAUDE_MODELO, max_tokens: 4000, temperature: 0.6, system: SISTEMA_JSON, messages: [{ role: "user", content: prompt }] }),
 });
+} catch (e) { throw new Error("claude: " + msgErro(e)); }
 const j = await r.json().catch(() => ({}));
 if (!r.ok) throw new Error(`claude: ${j?.error?.message || r.status}`);
-const txt = (j.content || []).map((c: any) => c.text || "").join("");
-const limpo = txt.replace(/^[\s\S]*?(\{)/, "$1").replace(/\}[^}]*$/, "}");
-try { return { modelo: CLAUDE_MODELO, ...JSON.parse(limpo) }; } catch { throw new Error("claude: resposta fora do formato"); }
+return { modelo: CLAUDE_MODELO, ...extraiJson((j.content || []).map((c: any) => c.text || "").join(""), "claude") };
 }
-async function gemini(prompt: string, leve = false) {
-if (ANTHROPIC_KEY && claudeFora < Date.now()) {
-try { return await chamaClaude(prompt, leve ? 45000 : 55000); }
-catch (e) { console.error(String(e)); if (!/formato/.test(String(e))) claudeFora = Date.now() + 2 * 60e3; }
+async function chamaCompat(nome: string, url: string, chave: string, modelo: string, prompt: string, ms: number, extra: any = {}) {
+const corpo: any = { model: modelo, temperature: 0.6, max_tokens: 4000, response_format: { type: "json_object" },
+messages: [{ role: "system", content: SISTEMA_JSON }, { role: "user", content: prompt }], ...extra };
+for (let t = 0; t < 2; t++) {
+let r: Response;
+try {
+r = await fetch(url, { method: "POST", signal: AbortSignal.timeout(ms),
+headers: { Authorization: `Bearer ${chave}`, "Content-Type": "application/json", ...(nome === "openrouter" ? { "HTTP-Referer": SITE_URL, "X-Title": "Radar" } : {}) },
+body: JSON.stringify(corpo) });
+} catch (e) { throw new Error(`${nome}:${modelo}: ${msgErro(e)}`); }
+const j = await r.json().catch(() => ({}));
+if (!r.ok) {
+const m = j?.error?.message || String(r.status);
+if (t === 0 && /response_format|json_object|json mode|reasoning|unsupported|not supported/i.test(m)) { delete corpo.response_format; delete corpo.reasoning_effort; continue; }
+throw new Error(`${nome}:${modelo}: ${r.status === 429 ? "quota " : ""}${m}`);
 }
-if (!GEMINI_KEY) return { erro: ANTHROPIC_KEY ? "A IA não respondeu agora. Tente de novo em instantes." : "GEMINI_API_KEY não configurada" };
+return { modelo: `${nome}:${modelo}`, ...extraiJson(j?.choices?.[0]?.message?.content || "", nome) };
+}
+throw new Error(`${nome}:${modelo}: sem resposta`);
+}
+let livresCache = { em: 0, lista: [] as string[] };
+async function modelosLivresOpenRouter() {
+if (Date.now() - livresCache.em < 6 * 3600e3 && livresCache.lista.length) return livresCache.lista;
+try {
+const j = await (await fetch("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(8000) })).json();
+const nota = (id: string) => (/deepseek/.test(id) ? 4 : /llama-3\.3-70b|llama-4/.test(id) ? 3 : /qwen|gemma|mistral/.test(id) ? 2 : 1);
+const l = (j.data || []).filter((m: any) => /:free$/.test(m.id) && Number(m.pricing?.prompt || 1) === 0 && (m.context_length || 0) >= 16000)
+.map((m: any) => m.id).sort((a: string, b: string) => nota(b) - nota(a));
+livresCache = { em: Date.now(), lista: l.slice(0, 6) };
+} catch { /* usa a lista antiga */ }
+return livresCache.lista;
+}
+async function tentaGroq(prompt: string, ms: number) {
+const lista = [...new Set([env("GROQ_MODEL"), "openai/gpt-oss-120b", "llama-3.3-70b-versatile"].filter(Boolean))] as string[];
+let ultimo: any;
+for (const m of lista) {
+if (foraAte["groq:" + m] > Date.now()) continue;
+try { return await chamaCompat("groq", "https://api.groq.com/openai/v1/chat/completions", GROQ_KEY, m, prompt, ms, /gpt-oss/.test(m) ? { reasoning_effort: "low" } : {}); }
+catch (e) { ultimo = e; const s = String(e); foraAte["groq:" + m] = Date.now() + (/quota|rate|limit/i.test(s) ? 20 : 3) * 60e3; if (/tempo esgotado/.test(s)) break; }
+}
+throw ultimo || new Error("groq: sem modelo disponível");
+}
+async function tentaOpenRouter(prompt: string, ms: number) {
+const livres = await modelosLivresOpenRouter();
+const lista = [env("OPENROUTER_MODEL"), ...livres].filter(Boolean) as string[];
+if (!lista.length) throw new Error("openrouter: nenhum modelo grátis encontrado");
+return await chamaCompat("openrouter", "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_KEY, lista[0], prompt, ms, lista.length > 1 ? { models: lista.slice(0, 3) } : {});
+}
+async function tentaGemini(prompt: string, leve: boolean, prazo: number, erros: string[], max: number) {
+if (!GEMINI_KEY) return null;
 if (Date.now() - listaCache.em > 3600e3) listaCache = { em: Date.now(), lista: await modelosDisponiveis() };
 const todos = listaCache.lista;
 const cheios = todos.filter((n) => !/lite/i.test(n)).slice(0, 3), lites = todos.filter((n) => /lite/i.test(n)).slice(0, 3);
 const base = [env("GEMINI_MODEL"), modeloBom, ...MODELOS.slice(1)].filter(Boolean);
-const ordem = [...new Set(leve ? [...lites, ...base, ...cheios] : [...base, ...cheios, ...lites])]
-.filter((m) => !(esgotado[m] > Date.now())).slice(0, 4);
-const erros: string[] = [];
-let soCota = true;
-const prazo = Date.now() + (leve ? 70000 : 90000); // nunca passar do limite da Edge Function
+const ordem = [...new Set(leve ? [...lites, ...base, ...cheios] : [...base, ...cheios, ...lites])].filter((m) => !(esgotado[m] > Date.now())).slice(0, max);
 for (const m of ordem) {
 for (const json of [true, false]) {
 const resta = prazo - Date.now();
-if (resta < 6000) { soCota = false; erros.push("tempo total esgotado"); break; }
-try { const r = await chamaModelo(m, prompt, json, Math.min(55000, resta)); if (!/lite/i.test(m)) modeloBom = m; return r; }
+if (resta < 6000) return null;
+try { const r = await chamaModelo(m, prompt, json, Math.min(45000, resta)); if (!/lite/i.test(m)) modeloBom = m; return r; }
 catch (e) {
 const msg = String(e instanceof Error ? e.message : e);
 erros.push(msg);
-if (/quota|exceeded|rate limit|RESOURCE_EXHAUSTED/i.test(msg)) esgotado[m] = Date.now() + 30 * 60e3;
-else if (/high demand|overloaded|unavailable|503|tempo esgotado/i.test(msg)) { esgotado[m] = Date.now() + 3 * 60e3; soCota = false; }
-else soCota = false;
+if (/quota|exceeded|rate limit|RESOURCE_EXHAUSTED|excedeu sua cota/i.test(msg)) esgotado[m] = Date.now() + 30 * 60e3;
+else if (/high demand|overloaded|unavailable|503|tempo esgotado/i.test(msg)) esgotado[m] = Date.now() + 3 * 60e3;
 if (!/formato/.test(msg)) break;
 }
 }
 }
-if (!erros.length) return { erro: "Todos os modelos da IA estão no limite agora. Tente de novo em alguns minutos." };
-if (soCota) return { erro: "O limite diário gratuito da IA (Google Gemini) acabou por hoje. Ele volta amanhã — ou ative o faturamento no Google AI Studio para não ter limite." };
-if (erros.some((e) => /tempo/.test(e))) return { erro: "A IA demorou demais para responder agora. Tente de novo em instantes." };
+return null;
+}
+async function gemini(prompt: string, leve = false) {
+const prazo = Date.now() + (leve ? 70000 : 90000);
+const erros: string[] = [];
+const outros = !!(GROQ_KEY || OPENROUTER_KEY);
+const passos: (() => Promise<any>)[] = [];
+const claude = async () => { if (!ANTHROPIC_KEY || foraAte.claude > Date.now()) return null; try { return await chamaClaude(prompt, Math.min(55000, prazo - Date.now())); } catch (e) { erros.push(String(e)); if (!/formato/.test(String(e))) foraAte.claude = Date.now() + 2 * 60e3; return null; } };
+const gem = async () => tentaGemini(prompt, leve, prazo, erros, outros ? 3 : 4);
+const groq = async () => { if (!GROQ_KEY) return null; try { return await tentaGroq(prompt, Math.min(40000, prazo - Date.now())); } catch (e) { erros.push(String(e)); return null; } };
+const orouter = async () => { if (!OPENROUTER_KEY || foraAte.openrouter > Date.now()) return null; try { return await tentaOpenRouter(prompt, Math.min(50000, prazo - Date.now())); } catch (e) { erros.push(String(e)); if (/quota|429|limit/i.test(String(e))) foraAte.openrouter = Date.now() + 30 * 60e3; return null; } };
+passos.push(...(leve ? [groq, gem, orouter, claude] : [claude, gem, groq, orouter]));
+for (const p of passos) {
+if (prazo - Date.now() < 6000) break;
+const r = await p();
+if (r && !r.erro) return r;
+}
+if (!ANTHROPIC_KEY && !GEMINI_KEY && !GROQ_KEY && !OPENROUTER_KEY) return { erro: "Nenhuma chave de IA configurada no Supabase." };
+if (erros.length && erros.every((e) => /quota|exceeded|rate|limit|RESOURCE_EXHAUSTED|excedeu sua cota|429/i.test(e)))
+return { erro: "As IAs gratuitas atingiram o limite por agora. Tente de novo mais tarde (os limites voltam ao longo do dia)." };
+if (!erros.length || erros.some((e) => /tempo/.test(e))) return { erro: "A IA demorou demais para responder agora. Tente de novo em instantes." };
 return { erro: "A IA está sobrecarregada agora. Tente de novo em alguns minutos. (" + corta(erros.slice(-2).join(" | "), 240) + ")" };
 }
 
@@ -491,10 +554,10 @@ Responda APENAS com este JSON:
 "rebater": 3 ou 4 ações. "metas": 3 metas realistas.`;
 }
 
-async function verificar(c: any) {
+async function verificar(c: any, manual = false) {
 let { data: loja } = c.empresa_id ? await db.from("empresas").select("*").eq("id", c.empresa_id).maybeSingle() : { data: null } as any;
 if (!loja) loja = (await db.from("empresas").select("*").eq("user_id", c.user_id).order("principal", { ascending: false }).limit(1).maybeSingle()).data;
-const { data: ant } = await db.from("verificacoes").select("dados").eq("concorrente_id", c.id)
+const { data: ant } = await db.from("verificacoes").select("dados,feita_em").eq("concorrente_id", c.id)
 .order("feita_em", { ascending: false }).limit(1).maybeSingle();
 const [site, ig, minhaIg] = await Promise.all([
 c.site ? lerSite(c.site) : Promise.resolve({ ok: false, erro: "sem site cadastrado" } as any),
@@ -513,11 +576,16 @@ const temDado = site.ok || ig.ok;
 const igAss = ig.ok ? ig.posts.map((p: any) => p.link + p.curtidas).join("|") : "";
 const assinatura = await hash(((site as any).assinatura || "") + igAss);
 const mesmaCoisa = ant?.dados?.assinatura === assinatura && ant?.dados?.ia && !ant.dados.ia.erro;
+const iaAnt = ant?.dados?.ia && !ant.dados.ia.erro ? ant.dados.ia : null;
+const iaEm = ant?.dados?.ia_em || ant?.feita_em || 0;
+const semNovidade = !manual && iaAnt && mudancas.length === 0 && Date.now() - Date.parse(iaEm) < 48 * 3600e3;
+const reusa = !!(temDado && (mesmaCoisa || semNovidade));
 const ia = !temDado ? { erro: "sem_dados" }
-: mesmaCoisa ? { ...ant!.dados.ia, reaproveitado: true }
+: reusa ? { ...iaAnt, reaproveitado: true }
 : await gemini(montaPrompt(loja, minhaIg, c, site, ig, mudancas), true);
+const ia_em = reusa ? iaEm : new Date().toISOString();
 const { amostra: _a, ...siteSalvo } = site as any;
-const dados = { versao: 6, site: siteSalvo, instagram: ig, minha_loja: minhaIg, anuncios: { biblioteca: bibliotecaAnuncios(c) }, mudancas, ia, assinatura };
+const dados = { versao: 6, site: siteSalvo, instagram: ig, minha_loja: minhaIg, anuncios: { biblioteca: bibliotecaAnuncios(c) }, mudancas, ia, ia_em, assinatura };
 const agora = new Date().toISOString();
 await db.from("verificacoes").insert({ concorrente_id: c.id, user_id: c.user_id, feita_em: agora, dados });
 await db.from("concorrentes").update({ ultima_verificacao: agora }).eq("id", c.id);
@@ -1230,7 +1298,10 @@ if (url.searchParams.get("diag") === "1") {
 if (Date.now() - ultimoDiag < 60e3) return resp({ erro: "Espere 1 minuto entre diagnósticos." }, 429);
 ultimoDiag = Date.now();
 const teste = 'Responda APENAS com este JSON: {"ok": true, "frase": "uma frase curta sobre pizza"}';
-const out: any = { gemini_chave: !!GEMINI_KEY, claude_chave: !!ANTHROPIC_KEY, modelo_configurado: env("GEMINI_MODEL") || null, testes: [] };
+const out: any = { gemini_chave: !!GEMINI_KEY, claude_chave: !!ANTHROPIC_KEY, groq_chave: !!GROQ_KEY, openrouter_chave: !!OPENROUTER_KEY, modelo_configurado: env("GEMINI_MODEL") || null, testes: [] };
+const tst = async (nome: string, fn: () => Promise<any>) => { const t0 = Date.now(); try { const r = await fn(); out.testes.push({ modelo: r?.modelo || nome, ok: true, ms: Date.now() - t0 }); } catch (e) { out.testes.push({ modelo: nome, ok: false, ms: Date.now() - t0, erro: corta(String(e), 300) }); } };
+if (GROQ_KEY) await tst("groq", () => tentaGroq(teste, 25000));
+if (OPENROUTER_KEY) { await tst("openrouter", () => tentaOpenRouter(teste, 30000)); out.openrouter_gratis = livresCache.lista; }
 if (ANTHROPIC_KEY) { const t0 = Date.now(); try { await chamaClaude(teste, 30000); out.testes.push({ modelo: CLAUDE_MODELO, ok: true, ms: Date.now() - t0 }); } catch (e) { out.testes.push({ modelo: CLAUDE_MODELO, ok: false, ms: Date.now() - t0, erro: corta(String(e), 300) }); } }
 if (GEMINI_KEY) {
 const lista = await modelosDisponiveis();
@@ -1350,7 +1421,7 @@ const podeRepetir = !ultV || !ultV.dados?.ia || ultV.dados.ia.erro || (ultV.dado
 const espera = p.id === "gratis" ? 60 : 10; // minutos entre verificações manuais
 if (!podeRepetir && Date.now() - Date.parse(c.ultima_verificacao) < espera * 60 * 1000)
 return resp({ erro: p.id === "gratis" ? "No plano Grátis dá para verificar de novo 1 vez por hora. Nos planos pagos, a cada 10 minutos." : "Essa concorrente foi verificada há poucos minutos. Tente de novo daqui a pouco." }, 429);
-return await bg(() => verificar(c));
+return await bg(() => verificar(c, true));
 } catch (e) {
 return resp({ erro: e instanceof Error ? e.message : String(e) }, 500);
 }
