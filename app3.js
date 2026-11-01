@@ -4,10 +4,10 @@ async function carregaPlano(){if(!CLOUD)return;try{const [a,t]=await Promise.all
  const L=(a&&a.data)||[];pl.perfil=(L.find(x=>x.tipo==='perfil')||{}).dados||null;pl.calendario=(L.find(x=>x.tipo==='calendario')||{}).dados||null;
  pl.campanhas={};L.filter(x=>x.tipo==='campanha').forEach(x=>{if(!pl.campanhas[x.chave])pl.campanhas[x.chave]=x.dados});
  pl.indice=(L.find(x=>x.tipo==='indice')||{}).dados||null;pl.meusProdutos=(L.find(x=>x.tipo==='meus_produtos')||{}).dados||null;pl.google=(L.find(x=>x.tipo==='google')||{}).dados||null;CONTEUDOS=null;respAval={};gerado=null;criarBase=null;pl.swipe=L.filter(x=>x.tipo==='swipe').map(x=>x.dados).sort((x,y)=>(y.vezes_media||0)-(x.vezes_media||0));pl.termos=(t&&t.data)||[];pl.ok=true}catch(e){pl.ok=true}}
-async function acao(nome,body,tentativa){try{const {data,error}=await sb.functions.invoke('verificar',{body:Object.assign({acao:nome,empresa_id:EMP_ID},body||{})});
+async function acao(nome,body,tentativa){try{const {data,error}=await sb.functions.invoke('verificar',{body:Object.assign({acao:nome,empresa_id:EMP_ID,async:true},body||{})});
  if(error){let m=error.message,j=null;try{j=await error.context.json();if(j&&j.erro)m=j.erro}catch(_){}
   if(!(j&&j.erro)&&msgRede(m)&&!tentativa){await new Promise(r=>setTimeout(r,2500));return acao(nome,body,1)}
-  return {erro:msgRede(m)?(navigator.onLine===false?'Sem internet no momento. Confira a conexão e tente de novo.':'O servidor do Radar demorou para responder. Tente de novo em instantes.'):m}}return data||{}}
+  return {erro:msgRede(m)?(navigator.onLine===false?'Sem internet no momento. Confira a conexão e tente de novo.':'O servidor do Radar demorou para responder. Tente de novo em instantes.'):m}}if(data&&data.tarefa)return await esperaTarefa(data.tarefa);return data||{}}
  catch(e){if(!tentativa&&msgRede(e.message)){await new Promise(r=>setTimeout(r,2500));return acao(nome,body,1)}return {erro:msgRede(e.message)?'O servidor do Radar demorou para responder. Tente de novo em instantes.':e.message}}}
 const so=(t)=>'<div class="card empty"><h2 style="font-size:20px">Disponível na versão conectada</h2><p class="mut">'+t+'</p></div>';
 const carregando=t=>'<div class="card" style="display:flex;gap:12px;align-items:center"><span class="spin"></span><b>'+esc(t)+'</b></div>';
