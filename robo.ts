@@ -1,4 +1,4 @@
-import { montaCriacao } from "./criar.ts?v=19";
+import { montaCriacao } from "./criar.ts?v=20";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 
 const env = (k: string) => Deno.env.get(k) ?? "";
@@ -818,7 +818,7 @@ await db.from("uso_ia").upsert({ user_id: uid, mes: mesAtual(), total: usado + 1
 return null;
 }
 const PRECISA: Record<string, string> = { perfil: "perfil", calendario: "calendario", campanha: "campanhas", reescrever: "inspiracoes", gerar: "gerador", indice: "indice",
-ajustar: "gerador", voz: "gerador", produtos: "gerador", imagem: "gerador", marca: "gerador", briefing: "gerador", carrossel: "gerador", pagina: "gerador", google: "avaliacoes", responder: "avaliacoes" };
+ajustar: "gerador", voz: "gerador", produtos: "gerador", imagem: "gerador", marca: "gerador", briefing: "gerador", carrossel: "gerador", pagina: "gerador", imagem_ia: "gerador", google: "avaliacoes", responder: "avaliacoes" };
 const NOME_REC: Record<string, string> = { perfil: "Meu perfil", calendario: "Calendário", campanhas: "Campanhas", inspiracoes: "Inspirações", gerador: "Criar com IA", indice: "Índice do nicho", aprovacao: "Aprovação do cliente", avaliacoes: "Avaliações do Google", whatsapp: "Alertas no WhatsApp" };
 
 async function indiceNicho(emp: any) {
@@ -1060,7 +1060,7 @@ if (url.searchParams.get("diag") === "1") {
 if (Date.now() - ultimoDiag < 60e3) return resp({ erro: "Espere 1 minuto entre diagnósticos." }, 429);
 ultimoDiag = Date.now();
 const teste = 'Responda APENAS com este JSON: {"ok": true, "frase": "uma frase curta sobre pizza"}';
-const out: any = { gemini_chave: !!GEMINI_KEY, claude_chave: !!ANTHROPIC_KEY, groq_chave: !!GROQ_KEY, openrouter_chave: !!OPENROUTER_KEY, modelo_configurado: env("GEMINI_MODEL") || null, testes: [] };
+const out: any = { imagens_cloudflare: !!(env("CF_ACCOUNT_ID") && env("CF_API_TOKEN")), gemini_chave: !!GEMINI_KEY, claude_chave: !!ANTHROPIC_KEY, groq_chave: !!GROQ_KEY, openrouter_chave: !!OPENROUTER_KEY, modelo_configurado: env("GEMINI_MODEL") || null, testes: [] };
 const tst = async (nome: string, fn: () => Promise<any>) => { const t0 = Date.now(); try { const r = await fn(); out.testes.push({ modelo: r?.modelo || nome, ok: true, ms: Date.now() - t0 }); } catch (e) { out.testes.push({ modelo: nome, ok: false, ms: Date.now() - t0, erro: corta(String(e), 300) }); } };
 if (GROQ_KEY) await tst("groq", () => tentaGroq(teste, 25000));
 if (OPENROUTER_KEY) { await tst("openrouter", () => tentaOpenRouter(teste, 30000)); out.openrouter_gratis = livresCache.lista; }
@@ -1167,6 +1167,7 @@ if (body.acao === "marca") return await bg(() => CR.perfilMarca(emp));
 if (body.acao === "briefing") return await bg(() => CR.briefing(emp, body));
 if (body.acao === "carrossel") return await bg(() => CR.gerarCarrossel(emp, body));
 if (body.acao === "pagina") return await bg(() => CR.refazerPagina(emp, body));
+if (body.acao === "imagem_ia") return await bg(() => CR.imagemIA(emp, body));
 if (body.acao === "produtos") return await bg(() => CR.meusProdutos(emp, true));
 if (body.acao === "imagem") return resp(await CR.imagemComoDados(String(body.url || "")));
 if (body.acao === "google") return await bg(() => CR.atualizarGoogle(emp));
