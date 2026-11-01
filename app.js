@@ -27,8 +27,9 @@ async function carregar(){const {data:u,error:ue}=await comPrazo(sb.auth.getUser
  conta={resp:{nome:P.nome,cpf:P.cpf,nasc:P.nascimento,tel:P.telefone,email:P.email},emp:{cnpj:E.cnpj,razao:E.razao_social,fantasia:E.nome_fantasia,seg:E.segmento,modo:E.modalidade||'',tel:E.telefone||'',cep:E.cep||'',num:E.numero||'',rua:E.endereco||'',bairro:E.bairro||'',cidade:E.cidade||''},loja:{ig:E.instagram,fb:E.facebook||'',site:E.site||'',seg:E.seguidores||0,meta:E.meta_seguidores||0,desc:E.descricao||'',logo:E.logo||''},criado:Date.parse(E.criado_em)};
  const ult={};(v&&v.data||[]).forEach(x=>{if(!ult[x.concorrente_id])ult[x.concorrente_id]=x});
  conc=(c.data||[]).map(r=>{const o=concFromDB(r),x=ult[r.id];if(x){o.v=x.dados;o.vEm=Date.parse(x.feita_em)}return o});await Promise.all([carregaPlano(),carregaAlertas()]);sess=true;return true}
-async function verificarNuvem(id){try{const {data,error}=await sb.functions.invoke('verificar',{body:{concorrente_id:id}});
- if(error){let m=error.message;try{const j=await error.context.json();if(j&&j.erro)m=j.erro}catch(_){}return {erro:/Failed to send|fetch/i.test(m)?'O robô ainda não foi instalado no Supabase.':m}}
+const msgRede=m=>/Failed to send|Failed to fetch|NetworkError|Load failed|non-2xx|FunctionsFetchError|FunctionsRelayError/i.test(String(m||''));
+async function verificarNuvem(id,tentativa){try{const {data,error}=await sb.functions.invoke('verificar',{body:{concorrente_id:id}});
+ if(error){let m=error.message,j=null;try{j=await error.context.json();if(j&&j.erro)m=j.erro}catch(_){}if(!(j&&j.erro)&&msgRede(m)&&!tentativa){await new Promise(r=>setTimeout(r,2500));return verificarNuvem(id,1)}return {erro:msgRede(m)?'O servidor do Radar demorou para responder. A leitura continua no próximo ciclo automático; tente de novo em instantes.':m}}
  const c=conc.find(x=>x.id===id);if(c&&data&&data.dados){c.v=data.dados;c.vEm=c.check=Date.parse(data.feita_em)}return data||{}}catch(e){return {erro:e.message}}}
 async function emailConfirmado(){try{let {data}=await sb.auth.getUser();let u=data&&data.user;
  if((!u||!u.email_confirmed_at)&&senhaTmp&&draft.resp&&draft.resp.email){const r=await sb.auth.signInWithPassword({email:draft.resp.email,password:senhaTmp});u=r.data&&r.data.user}
