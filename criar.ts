@@ -367,7 +367,7 @@ if (ia.erro) return ia;
 return { ...limpaIA(ia), tipo, pedido: b.pedido || "" };
 }
 
-const FORMATO_PAGINA = `{"layout": "capa|topicos|numero|frase|foto|cta", "titulo": "até 8 palavras", "texto": "até 28 palavras", "itens": ["até 4 itens de até 6 palavras"], "destaque": "número ou palavra curta (opcional)", "emoji": "1 emoji (opcional)", "foto": índice da foto enviada ou null}`;
+const FORMATO_PAGINA = `{"layout": "capa|topicos|numero|frase|foto|cta", "titulo": "até 8 palavras", "texto": "até 28 palavras", "itens": ["até 4 itens de até 6 palavras"], "destaque": "número ou palavra curta (opcional)", "emoji": "1 emoji (opcional)", "foto": índice da foto enviada ou null, "imagem": "em INGLÊS: descrição de um fundo ou ilustração para esta página (cenário, textura, objetos, luz, cores da marca), SEM texto, SEM letras, SEM logotipos, SEM pessoas reais e SEM mostrar o produto da loja"}`;
 async function gerarCarrossel(emp: any, b: any) {
 const br = b.briefing || {};
 const nf = Math.max(0, Math.min(10, Number(b.fotos) || 0));
@@ -399,6 +399,52 @@ if (ia.erro) return ia;
 return { pagina: ia.pagina || ia };
 }
 
+const CF_CONTA = env("CF_ACCOUNT_ID"), CF_TOKEN = env("CF_API_TOKEN"), CF_MODELO = env("CF_IMAGE_MODEL") || "@cf/black-forest-labs/flux-1-schnell";
+async function imagemIA(emp: any, b: any) {
+if (!CF_CONTA || !CF_TOKEN) return { erro: "A criação de imagens por IA ainda não foi ativada no Radar." };
+const p = await planoDe(emp.user_id);
+const lim = Number(p?.img_dia ?? 10), dia = hoje();
+const { data: u } = await db.from("uso_imagens").select("total").eq("user_id", emp.user_id).eq("dia", dia).maybeSingle();
+if ((u?.total || 0) >= lim) return { erro: `Você já gerou as ${lim} imagens por IA de hoje no plano ${p?.nome || ""}. Amanhã libera de novo.`, limite: true };
+let desc = String(b.prompt || "").slice(0, 600);
+if (!desc) {
+const r: any = await gemini(`Write a short English prompt (max 60 words) for an AI image generator to create a BACKGROUND or ILLUSTRATION for an Instagram post.
+Business: ${lojaTxt(emp)}
+Post page: ${JSON.stringify(b.pagina || {}).slice(0, 400)}
+Brand style: ${marcaTxt(emp)}
+Rules: no text, no letters, no logos, no real people, do not show the store's actual product. Respond ONLY with JSON: {"prompt": "..."}`, true);
+desc = r?.prompt || `abstract background for a ${emp.segmento || "local business"} Instagram post`;
+}
+const cores = ((b.cores || emp.marca?.cores?.map((c: any) => c.hex) || []) as string[]).filter((h) => /^#[0-9a-f]{6}$/i.test(h)).slice(0, 3);
+const estilo = b.estilo || emp.marca?.clima || "";
+const prompt = `${desc}. Style: professional Instagram post background, ${estilo}${cores.length ? ", color palette " + cores.join(", ") : ""}, clean composition with empty space for text, high quality. No text, no letters, no words, no watermark, no logos.`.slice(0, 1800);
+let r: Response;
+try {
+r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_CONTA}/ai/run/${CF_MODELO}`, {
+method: "POST", signal: AbortSignal.timeout(60000),
+headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
+body: JSON.stringify({ prompt, steps: 4 }),
+});
+} catch { return { erro: "A IA de imagens demorou demais. Tente de novo." }; }
+const tipo = r.headers.get("content-type") || "";
+let b64 = "";
+if (/json/.test(tipo)) {
+const j: any = await r.json().catch(() => ({}));
+if (!r.ok || j?.success === false) {
+const m = j?.errors?.[0]?.message || String(r.status);
+return { erro: /neuron|quota|limit|429|exceeded/i.test(m) || r.status === 429 ? "A cota grátis de imagens por IA acabou por hoje. Volta amanhã." : "A IA de imagens não respondeu agora. (" + corta(m, 120) + ")" };
+}
+b64 = j?.result?.image || "";
+} else if (r.ok) {
+const buf = new Uint8Array(await r.arrayBuffer());
+let bin = ""; for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode(...buf.subarray(i, i + 32768));
+b64 = btoa(bin);
+}
+if (!b64) return { erro: "A IA de imagens não devolveu a imagem. Tente de novo." };
+await db.from("uso_imagens").upsert({ user_id: emp.user_id, dia, total: (u?.total || 0) + 1 }, { onConflict: "user_id,dia" });
+return { dados: `data:${/png/.test(tipo) ? "image/png" : "image/jpeg"};base64,${b64}`, restam: Math.max(0, lim - (u?.total || 0) - 1), prompt: desc };
+}
+
 return { gerarLivre, ajustarTexto, aprenderVoz, meusProdutos, imagemComoDados, atualizarGoogle, responderAvaliacao, medirConteudos, googleDoDia, enviaWhatsApp, vozTxt,
-perfilMarca, briefing, gerarCarrossel, refazerPagina };
+perfilMarca, briefing, gerarCarrossel, refazerPagina, imagemIA };
 }
