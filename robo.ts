@@ -1,4 +1,4 @@
-import { montaCriacao } from "./criar.ts?v=21";
+import { montaCriacao } from "./criar.ts?v=22";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
 
 const env = (k: string) => Deno.env.get(k) ?? "";
